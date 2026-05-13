@@ -1,0 +1,11 @@
+{
+  "id": "hello-world",
+  "description": "The agent should create a file named hello.txt containing the word 'hello'.",
+  "prompt": "Create a file called hello.txt in the current directory with exactly the word hello as its content. No newline needed.",
+  "expect": {
+    "files_exist": ["hello.txt"],
+    "file_matches": [{ "path": "hello.txt", "pattern": "^hello" }],
+    "tools_used": ["Write"]
+  },
+  "maxTurns": 8
+}

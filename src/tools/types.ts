@@ -21,6 +21,8 @@ export interface SubagentRequest {
   description: string;
   prompt: string;
   subagent_type?: string;
+  /** When set, run the subagent inside a fresh git worktree. */
+  isolation?: "worktree";
 }
 
 export interface ToolResult {

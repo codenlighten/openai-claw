@@ -77,7 +77,7 @@ async function main() {
   if (mcpTools.length > 0) {
     console.error(chalk.dim(`[mcp] loaded ${mcpTools.length} tool(s) from ${mcpSpecs.length} server(s)`));
   }
-  const tools = [...getAllTools(), ...mcpTools];
+  const tools = [...getAllTools(config), ...mcpTools];
   const permissions = new PermissionManager(config);
   const hookRunner = new HookRunner(config);
   loadTodos(config.memoryDir);

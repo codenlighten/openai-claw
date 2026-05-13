@@ -34,7 +34,8 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
     "prepare": "test -d dist || npm run build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "eval": "tsx src/eval/cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",

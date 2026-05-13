@@ -2,8 +2,13 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { ChatItem } from "./types.js";
 import { Diff } from "./Diff.js";
-import { renderMarkdown } from "./markdown.js";
+import { renderMarkdown, renderStreamingMarkdown } from "./markdown.js";
 import { highlightToolOutput } from "./highlight.js";
+
+function renderAssistant(text: string, streaming?: boolean): string {
+  if (streaming) return renderStreamingMarkdown(text);
+  return renderMarkdown(text);
+}
 
 export function MessageView({ item }: { item: ChatItem }) {
   switch (item.kind) {
@@ -18,7 +23,7 @@ export function MessageView({ item }: { item: ChatItem }) {
     case "assistant":
       return (
         <Box marginTop={1} flexDirection="column">
-          <Text>{renderMarkdown(item.text)}</Text>
+          <Text>{renderAssistant(item.text, item.streaming)}</Text>
         </Box>
       );
 

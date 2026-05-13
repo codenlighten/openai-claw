@@ -1,0 +1,16 @@
+{
+  "id": "fix-typo",
+  "description": "Given a Python file with a typo in a variable name, fix it.",
+  "setup": [
+    "cat > main.py <<'EOF'\ndef greet(name):\n    grettings = 'Hello, ' + name\n    return grettings\nEOF"
+  ],
+  "prompt": "There's a typo in main.py — the variable `grettings` should be `greetings`. Fix it (both the assignment and the return).",
+  "expect": {
+    "file_matches": [
+      { "path": "main.py", "pattern": "greetings = " },
+      { "path": "main.py", "pattern": "return greetings" }
+    ],
+    "tools_used": ["Edit"]
+  },
+  "maxTurns": 8
+}

@@ -11,6 +11,7 @@ import type { PermissionManager } from "../permissions/index.js";
 import { loadSession, saveSession, listSessions, forkSession } from "../session.js";
 import { loadMcpServerSpecs, getMcpDirectory } from "../mcp/index.js";
 import { readCostLog, costByDay, costByModel } from "../cost.js";
+import { buildIndex, loadIndex, semanticSearch } from "../rag/index.js";
 import { prepareUserMessage } from "../input.js";
 import { HookRunner } from "../hooks/index.js";
 import { spawnSync } from "node:child_process";
@@ -365,10 +366,15 @@ export const builtinCommands: SlashCommand[] = [
   },
   {
     name: "agents",
-    description: "List available subagent types",
-    run() {
-      console.log("  general-purpose — full tools, used for open-ended multi-step tasks");
-      console.log("  explore         — read-only (Read/Grep/Glob/LS/WebFetch/WebSearch)");
+    description: "List available subagent types (builtins + .claw/agents/*.md)",
+    async run(_args, ctx) {
+      const { listSubagents } = await import("../subagents/index.js");
+      const agents = listSubagents(ctx.config);
+      for (const a of agents) {
+        const tools = a.tools ? ` [tools=${a.tools.length}]` : "";
+        const role = a.modelRole ? ` [${a.modelRole}]` : "";
+        console.log(`  ${a.name.padEnd(20)}${tools}${role}  ${a.description}`);
+      }
     },
   },
   {
@@ -426,6 +432,43 @@ export const builtinCommands: SlashCommand[] = [
         "Review the pending changes on the current branch. Run `git diff` and `git status`, then evaluate correctness, edge cases, tests, and security. Report a concise punch list."
       );
       console.log(chalk.dim("(review prompt queued — press Enter to send)"));
+    },
+  },
+  {
+    name: "index",
+    description: "Build or rebuild the project's semantic index (used by the Semantic tool)",
+    async run(_args, ctx) {
+      console.log(chalk.dim("indexing… this may take a moment"));
+      try {
+        const r = await buildIndex(ctx.config, (msg) => console.log(chalk.dim(`  ${msg}`)));
+        console.log(chalk.dim(`indexed ${r.filesIndexed} file(s) → ${r.chunks} chunk(s)`));
+      } catch (e: any) {
+        console.log(chalk.red(`index failed: ${e?.message ?? e}`));
+      }
+    },
+  },
+  {
+    name: "search",
+    description: "Semantic search over the project index: /search <natural-language query>",
+    async run(args, ctx) {
+      const q = args.trim();
+      if (!q) {
+        console.log(chalk.red("usage: /search <query>"));
+        return;
+      }
+      const idx = loadIndex(ctx.config);
+      if (!idx) {
+        console.log(chalk.red("no index — run /index first"));
+        return;
+      }
+      try {
+        const hits = await semanticSearch(ctx.config, q, 8);
+        for (const h of hits) {
+          console.log(`  ${chalk.cyan(h.score.toFixed(3))}  ${h.file}#${h.chunkIndex}`);
+        }
+      } catch (e: any) {
+        console.log(chalk.red(`search failed: ${e?.message ?? e}`));
+      }
     },
   },
   {
