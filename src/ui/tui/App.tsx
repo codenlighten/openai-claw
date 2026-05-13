@@ -8,6 +8,7 @@ import { findCommand } from "../../commands/index.js";
 import { HookRunner } from "../../hooks/index.js";
 import { prepareUserMessage } from "../../input.js";
 import { saveSession } from "../../session.js";
+import { notify } from "../../notifications/index.js";
 import { MessageView } from "./MessageView.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
 import { StatusBar } from "./StatusBar.js";
@@ -213,6 +214,7 @@ export function App({ agent, config, permissions, hooks }: AppProps) {
       }
     };
 
+    const turnStart = Date.now();
     try {
       await agent.run(handler, aborterRef.current.signal);
     } catch (e: any) {
@@ -226,6 +228,13 @@ export function App({ agent, config, permissions, hooks }: AppProps) {
         const { id } = saveSession(config, agent.conversation, sessionRef.current.current);
         sessionRef.current.current = id;
       } catch {}
+      const durationSec = (Date.now() - turnStart) / 1000;
+      notify(config, {
+        kind: "Stop",
+        title: "turn complete",
+        body: `(${durationSec.toFixed(1)}s)`,
+        durationSec,
+      }).catch(() => {});
     }
   }
 

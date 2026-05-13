@@ -7,6 +7,7 @@ import { findCommand, builtinCommands } from "../commands/index.js";
 import { HookRunner } from "../hooks/index.js";
 import { prepareUserMessage } from "../input.js";
 import { saveSession } from "../session.js";
+import { notify } from "../notifications/index.js";
 
 export interface ReplOptions {
   agent: Agent;
@@ -134,6 +135,7 @@ export async function startRepl({ agent, config, permissions }: ReplOptions): Pr
     agent.pushUser(prepared.content);
     aborter = new AbortController();
     const handler = makeEventHandler(hooks);
+    const turnStart = Date.now();
     try {
       await agent.run(handler, aborter.signal);
     } catch (e: any) {
@@ -144,6 +146,13 @@ export async function startRepl({ agent, config, permissions }: ReplOptions): Pr
         const { id } = saveSession(config, agent.conversation, sessionRef.current);
         sessionRef.current = id;
       } catch {}
+      const durationSec = (Date.now() - turnStart) / 1000;
+      notify(config, {
+        kind: "Stop",
+        title: "turn complete",
+        body: `${input.slice(0, 100)} (${durationSec.toFixed(1)}s)`,
+        durationSec,
+      }).catch(() => {});
     }
     process.stdout.write("\n");
     prompt();

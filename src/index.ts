@@ -37,6 +37,17 @@ import { loadTodos } from "./tools/todo.js";
 const PKG_VERSION = "0.1.0";
 
 async function main() {
+  // Top-level subcommands handled before the interactive yargs parser.
+  const rawArgs = process.argv.slice(2);
+  if (rawArgs[0] === "install" || rawArgs[0] === "uninstall" || rawArgs[0] === "plugins") {
+    return runPluginCli(rawArgs);
+  }
+  if (rawArgs[0] === "pr") {
+    return runPrCli(rawArgs.slice(1));
+  }
+  if (rawArgs[0] === "dashboard") {
+    return runDashboardCli(rawArgs.slice(1));
+  }
   const argv = await yargs(hideBin(process.argv))
     .scriptName("claw")
     .version(PKG_VERSION)
@@ -159,6 +170,74 @@ function readStdinToEnd(): Promise<string> {
     process.stdin.on("data", (c) => (buf += c));
     process.stdin.on("end", () => resolve(buf.trim()));
   });
+}
+
+async function runPluginCli(args: string[]): Promise<void> {
+  const config = loadConfig();
+  const { installPlugin, removePlugin, listInstalled, searchRegistry } = await import("./plugins/index.js");
+  const [cmd, ...rest] = args;
+  if (cmd === "install") {
+    const src = rest[0];
+    if (!src) {
+      console.error(chalk.red("usage: claw install <name-or-git-url>"));
+      process.exit(2);
+    }
+    console.error(chalk.dim(`installing ${src}…`));
+    const r = installPlugin(config, src);
+    if (!r.ok) {
+      console.error(chalk.red(r.error));
+      process.exit(1);
+    }
+    const p = r.entry;
+    console.error(
+      chalk.dim(
+        `installed ${p.name} (${p.ref?.slice(0, 7) ?? "?"})  skills=${p.provides.skills.length} agents=${p.provides.agents.length} mcp=${p.provides.mcp.length}`
+      )
+    );
+    return;
+  }
+  if (cmd === "uninstall") {
+    const name = rest[0];
+    if (!name) { console.error(chalk.red("usage: claw uninstall <name>")); process.exit(2); }
+    const r = removePlugin(config, name);
+    if (!r.ok) { console.error(chalk.red(r.error)); process.exit(1); }
+    console.error(chalk.dim(`removed ${name}`));
+    return;
+  }
+  if (cmd === "plugins") {
+    const sub = rest[0] ?? "list";
+    if (sub === "list") {
+      for (const p of listInstalled(config)) console.log(`${p.name}\t${p.source}\t${p.ref ?? ""}`);
+      return;
+    }
+    if (sub === "search") {
+      const q = rest.slice(1).join(" ");
+      for (const h of searchRegistry(q)) console.log(`${h.name}\t${h.url}\t${h.description}`);
+      return;
+    }
+    console.error(chalk.red("usage: claw plugins [list|search <q>]"));
+    process.exit(2);
+  }
+}
+
+async function runPrCli(args: string[]): Promise<void> {
+  const task = args.join(" ").trim();
+  if (!task) {
+    console.error(chalk.red('usage: claw pr "<task description>"'));
+    process.exit(2);
+  }
+  const { runAutoPr } = await import("./autopr/index.js");
+  const config = loadConfig();
+  const ok = await runAutoPr(config, task);
+  process.exit(ok ? 0 : 1);
+}
+
+async function runDashboardCli(args: string[]): Promise<void> {
+  const portArg = args.find((a) => a.startsWith("--port="))?.split("=")[1];
+  const port = parseInt(portArg ?? "3737", 10);
+  const { startDashboard } = await import("./web/index.js");
+  const config = loadConfig();
+  await startDashboard(config, port);
 }
 
 main().catch((e) => {

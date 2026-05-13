@@ -12,6 +12,8 @@ import { loadSession, saveSession, listSessions, forkSession } from "../session.
 import { loadMcpServerSpecs, getMcpDirectory } from "../mcp/index.js";
 import { readCostLog, costByDay, costByModel } from "../cost.js";
 import { buildIndex, loadIndex, semanticSearch } from "../rag/index.js";
+import { runSelfReview, applyProposal } from "../self-review/index.js";
+import { installPlugin, removePlugin, listInstalled, searchRegistry } from "../plugins/index.js";
 import { prepareUserMessage } from "../input.js";
 import { HookRunner } from "../hooks/index.js";
 import { spawnSync } from "node:child_process";
@@ -448,6 +450,66 @@ export const builtinCommands: SlashCommand[] = [
     },
   },
   {
+    name: "self-review",
+    description: "Scan recent sessions for repeated friction and propose new memory entries (asks before saving)",
+    async run(args, ctx) {
+      const n = parseInt(args.trim(), 10) || 20;
+      console.log(chalk.dim(`scanning the last ${n} sessions…`));
+      try {
+        const report = await runSelfReview(ctx.config, { sessionLimit: n });
+        console.log(
+          chalk.dim(
+            `scanned ${report.sessionsScanned} session(s); ${report.signals.correctionPhrases} correction phrase(s), ${report.signals.repeatedToolErrors} repeated tool error(s)`
+          )
+        );
+        if (report.proposals.length === 0) {
+          console.log(chalk.dim("(no new memory proposals)"));
+          return;
+        }
+        for (let i = 0; i < report.proposals.length; i++) {
+          const p = report.proposals[i];
+          console.log(`\n${chalk.cyan(`#${i + 1}`)} ${chalk.bold(p.name)} [${p.type}] — ${p.description}`);
+          console.log(p.body.split("\n").map((l) => `    ${l}`).join("\n"));
+        }
+        console.log(chalk.dim("\nTo accept all: /self-review-accept all"));
+        console.log(chalk.dim("To accept specific: /self-review-accept 1 3"));
+        (ctx.agent as any).__pendingReview = report;
+      } catch (e: any) {
+        console.log(chalk.red(`/self-review failed: ${e?.message ?? e}`));
+      }
+    },
+  },
+  {
+    name: "self-review-accept",
+    description: "Apply proposals from the most recent /self-review. Args: 'all' or numbers like '1 3'",
+    run(args, ctx) {
+      const report = (ctx.agent as any).__pendingReview;
+      if (!report || !Array.isArray(report.proposals) || report.proposals.length === 0) {
+        console.log(chalk.red("no pending proposals — run /self-review first"));
+        return;
+      }
+      const want = args.trim();
+      let indices: number[];
+      if (want === "all") {
+        indices = report.proposals.map((_: unknown, i: number) => i);
+      } else {
+        indices = want
+          .split(/\s+/)
+          .map((s) => parseInt(s, 10) - 1)
+          .filter((n) => Number.isFinite(n) && n >= 0 && n < report.proposals.length);
+      }
+      if (indices.length === 0) {
+        console.log(chalk.red("usage: /self-review-accept all | <1-based indices...>"));
+        return;
+      }
+      for (const i of indices) {
+        const file = applyProposal(ctx.config, report.proposals[i]);
+        console.log(chalk.dim(`saved ${file}`));
+      }
+      (ctx.agent as any).__pendingReview = null;
+    },
+  },
+  {
     name: "search",
     description: "Semantic search over the project index: /search <natural-language query>",
     async run(args, ctx) {
@@ -469,6 +531,75 @@ export const builtinCommands: SlashCommand[] = [
       } catch (e: any) {
         console.log(chalk.red(`search failed: ${e?.message ?? e}`));
       }
+    },
+  },
+  {
+    name: "plugins",
+    description: "Manage plugins. /plugins list — installed. /plugins search <q>. /plugins install <name|url>. /plugins remove <name>.",
+    run(args, ctx) {
+      const parts = args.trim().split(/\s+/);
+      const sub = parts[0] || "list";
+      if (sub === "list") {
+        const installed = listInstalled(ctx.config);
+        if (installed.length === 0) {
+          console.log(chalk.dim("(no plugins installed)"));
+          return;
+        }
+        for (const p of installed) {
+          const summary = [
+            p.provides.skills.length && `skills=${p.provides.skills.length}`,
+            p.provides.agents.length && `agents=${p.provides.agents.length}`,
+            p.provides.mcp.length && `mcp=${p.provides.mcp.length}`,
+          ].filter(Boolean).join(" ");
+          console.log(`  ${chalk.cyan(p.name)}  ${chalk.dim(p.source)}  ${summary}`);
+        }
+        return;
+      }
+      if (sub === "search") {
+        const q = parts.slice(1).join(" ");
+        const hits = searchRegistry(q);
+        if (hits.length === 0) {
+          console.log(chalk.dim("(no registry matches)"));
+          return;
+        }
+        for (const h of hits) console.log(`  ${chalk.cyan(h.name)}  ${chalk.dim(h.url)}\n    ${h.description}`);
+        return;
+      }
+      if (sub === "install") {
+        const source = parts.slice(1).join(" ").trim();
+        if (!source) {
+          console.log(chalk.red("usage: /plugins install <name-or-git-url>"));
+          return;
+        }
+        console.log(chalk.dim(`installing ${source}…`));
+        const r = installPlugin(ctx.config, source);
+        if (!r.ok) {
+          console.log(chalk.red(`install failed: ${r.error}`));
+          return;
+        }
+        const p = r.entry;
+        console.log(
+          chalk.dim(
+            `installed ${p.name} (${p.ref?.slice(0, 7) ?? "?"})  skills=${p.provides.skills.length} agents=${p.provides.agents.length} mcp=${p.provides.mcp.length}`
+          )
+        );
+        return;
+      }
+      if (sub === "remove") {
+        const name = parts.slice(1).join(" ").trim();
+        if (!name) {
+          console.log(chalk.red("usage: /plugins remove <name>"));
+          return;
+        }
+        const r = removePlugin(ctx.config, name);
+        if (!r.ok) {
+          console.log(chalk.red(r.error));
+          return;
+        }
+        console.log(chalk.dim(`removed ${name}`));
+        return;
+      }
+      console.log(chalk.red("usage: /plugins [list|search <q>|install <src>|remove <name>]"));
     },
   },
   {
