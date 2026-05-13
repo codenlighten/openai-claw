@@ -32,28 +32,38 @@ export const editTool: Tool<{
     if (!fs.existsSync(fp)) return err(`File does not exist: ${fp}`);
     if (input.old_string === input.new_string) return err("new_string must differ from old_string");
 
-    const text = fs.readFileSync(fp, "utf8");
+    const original = fs.readFileSync(fp, "utf8");
+    // If the file uses CRLF endings but old_string was given with LF (typical when the
+    // model echoes Read output), normalize both sides for matching, then re-apply line
+    // endings to the final result.
+    const usesCRLF = original.includes("\r\n");
+    const matchText = usesCRLF ? original.replace(/\r\n/g, "\n") : original;
+    const oldStr = input.old_string.replace(/\r\n/g, "\n");
+    const newStr = input.new_string.replace(/\r\n/g, "\n");
+
     let updated: string;
     let summary: string;
     if (input.replace_all) {
-      const count = text.split(input.old_string).length - 1;
+      const count = matchText.split(oldStr).length - 1;
       if (count === 0) return err(`old_string not found in ${fp}`);
-      updated = text.split(input.old_string).join(input.new_string);
+      updated = matchText.split(oldStr).join(newStr);
       summary = `Replaced ${count} occurrence(s) in ${fp}`;
     } else {
-      const first = text.indexOf(input.old_string);
+      const first = matchText.indexOf(oldStr);
       if (first === -1) return err(`old_string not found in ${fp}`);
-      const last = text.lastIndexOf(input.old_string);
+      const last = matchText.lastIndexOf(oldStr);
       if (first !== last) {
         return err(
           `old_string is not unique in ${fp} (found multiple matches). Provide more context or set replace_all=true.`
         );
       }
-      updated = text.slice(0, first) + input.new_string + text.slice(first + input.old_string.length);
+      updated = matchText.slice(0, first) + newStr + matchText.slice(first + oldStr.length);
       summary = `Edited ${fp}`;
     }
-    fs.writeFileSync(fp, updated, "utf8");
-    const patch = createPatch(path.relative(process.cwd(), fp), text, updated, "", "");
+
+    const finalText = usesCRLF ? updated.replace(/\n/g, "\r\n") : updated;
+    fs.writeFileSync(fp, finalText, "utf8");
+    const patch = createPatch(path.relative(process.cwd(), fp), original, finalText, "", "");
     return { content: summary, display: patch };
   },
   preview: (input) => `Edit ${input.file_path}`,

@@ -21,6 +21,8 @@ const ctx = (): ToolContext => ({
     contextWindow: 0,
     compactThreshold: 1,
     permissionMode: "ask",
+    maxTurns: 50,
+    maxToolResultChars: 50_000,
   },
   permissionCheck: async () => ({ allow: true }),
 });
@@ -108,5 +110,43 @@ describe("Edit", () => {
       ctx()
     );
     expect(r.isError).toBe(true);
+  });
+
+  it("matches across mismatched line endings (CRLF file, LF query)", async () => {
+    const p = path.join(tmp, "crlf.txt");
+    fs.writeFileSync(p, "alpha\r\nbeta\r\ngamma\r\n");
+    const r = await editTool.run(
+      { file_path: p, old_string: "alpha\nbeta", new_string: "alpha\nBETA" },
+      ctx()
+    );
+    expect(r.isError).toBeFalsy();
+    // CRLF preserved on disk.
+    expect(fs.readFileSync(p, "utf8")).toBe("alpha\r\nBETA\r\ngamma\r\n");
+  });
+});
+
+describe("Read (.ipynb)", () => {
+  it("returns cell sources and outputs", async () => {
+    const p = path.join(tmp, "nb.ipynb");
+    fs.writeFileSync(
+      p,
+      JSON.stringify({
+        cells: [
+          { cell_type: "markdown", source: ["# title\n"] },
+          {
+            cell_type: "code",
+            source: ["print('hi')\n"],
+            outputs: [{ text: ["hi\n"] }],
+          },
+        ],
+      })
+    );
+    const r = await readTool.run({ file_path: p }, ctx());
+    expect(r.content).toContain("[cell 1 type=markdown]");
+    expect(r.content).toContain("# title");
+    expect(r.content).toContain("[cell 2 type=code]");
+    expect(r.content).toContain("print('hi')");
+    expect(r.content).toContain("[cell 2 output]");
+    expect(r.content).toContain("hi");
   });
 });

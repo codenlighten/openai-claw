@@ -17,6 +17,8 @@ export interface ClawConfig {
   homeDir: string;
   projectDir: string;
   memoryDir: string;
+  maxTurns: number;
+  maxToolResultChars: number;
 }
 
 const DEFAULTS = {
@@ -24,6 +26,8 @@ const DEFAULTS = {
   contextWindow: 200_000,
   compactThreshold: 0.85,
   permissionMode: "ask" as const,
+  maxTurns: 50,
+  maxToolResultChars: 50_000,
 };
 
 function resolveProjectDir(workdir: string): string {
@@ -63,6 +67,8 @@ export function loadConfig(overrides: Partial<ClawConfig> = {}): ClawConfig {
     permissionMode: projectSettings.permissionMode ?? userSettings.permissionMode ?? DEFAULTS.permissionMode,
     allowedTools: [...(userSettings.allowedTools ?? []), ...(projectSettings.allowedTools ?? [])],
     deniedTools: [...(userSettings.deniedTools ?? []), ...(projectSettings.deniedTools ?? [])],
+    maxTurns: projectSettings.maxTurns ?? userSettings.maxTurns ?? DEFAULTS.maxTurns,
+    maxToolResultChars: projectSettings.maxToolResultChars ?? userSettings.maxToolResultChars ?? DEFAULTS.maxToolResultChars,
     workdir,
     homeDir,
     projectDir,

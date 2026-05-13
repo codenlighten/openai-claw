@@ -2,15 +2,25 @@ import fs from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { ClawConfig } from "../config.js";
 import { type Tool, ok, err } from "../tools/types.js";
 
-export interface McpServerConfig {
+export interface McpStdioConfig {
+  type?: "stdio";
   command: string;
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
 }
+
+export interface McpHttpConfig {
+  type: "http";
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export type McpServerConfig = McpStdioConfig | McpHttpConfig;
 
 export interface McpServerSpec {
   name: string;
@@ -21,6 +31,8 @@ interface ConnectedServer {
   name: string;
   client: Client;
   tools: Tool[];
+  resources: { uri: string; name?: string; description?: string }[];
+  prompts: { name: string; description?: string }[];
 }
 
 let connected: ConnectedServer[] = [];
@@ -58,18 +70,57 @@ export async function disconnectAll(): Promise<void> {
 }
 
 async function connectOne(spec: McpServerSpec): Promise<ConnectedServer> {
-  const transport = new StdioClientTransport({
-    command: spec.config.command,
-    args: spec.config.args ?? [],
-    env: { ...process.env, ...(spec.config.env ?? {}) } as Record<string, string>,
-    cwd: spec.config.cwd,
-  });
+  const transport =
+    spec.config.type === "http"
+      ? new StreamableHTTPClientTransport(new URL(spec.config.url), {
+          requestInit: { headers: spec.config.headers },
+        })
+      : new StdioClientTransport({
+          command: spec.config.command,
+          args: spec.config.args ?? [],
+          env: { ...process.env, ...(spec.config.env ?? {}) } as Record<string, string>,
+          cwd: spec.config.cwd,
+        });
   const client = new Client({ name: "openai-claw", version: "0.1.0" }, { capabilities: {} });
   await client.connect(transport);
 
   const list = await client.listTools();
   const tools: Tool[] = list.tools.map((t: any) => wrapTool(spec.name, client, t));
-  return { name: spec.name, client, tools };
+
+  // Resources and prompts are optional; servers may not implement them.
+  let resources: ConnectedServer["resources"] = [];
+  let prompts: ConnectedServer["prompts"] = [];
+  try {
+    const r = await client.listResources();
+    resources = (r.resources ?? []).map((x: any) => ({
+      uri: x.uri,
+      name: x.name,
+      description: x.description,
+    }));
+  } catch {}
+  try {
+    const p = await client.listPrompts();
+    prompts = (p.prompts ?? []).map((x: any) => ({
+      name: x.name,
+      description: x.description,
+    }));
+  } catch {}
+
+  return { name: spec.name, client, tools, resources, prompts };
+}
+
+export function getMcpDirectory(): {
+  resources: { server: string; uri: string; name?: string; description?: string }[];
+  prompts: { server: string; name: string; description?: string }[];
+} {
+  return {
+    resources: connected.flatMap((c) =>
+      c.resources.map((r) => ({ server: c.name, ...r }))
+    ),
+    prompts: connected.flatMap((c) =>
+      c.prompts.map((p) => ({ server: c.name, ...p }))
+    ),
+  };
 }
 
 function wrapTool(serverName: string, client: Client, remote: any): Tool {

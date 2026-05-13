@@ -14,10 +14,11 @@ export const grepTool: Tool<{
   "-B"?: number;
   "-C"?: number;
   head_limit?: number;
+  multiline?: boolean;
 }> = {
   name: "Grep",
   description:
-    "Search file contents using ripgrep-style regex. Supports glob filters, content/files-with-matches/count output, line numbers, context lines. Prefer this over `grep` via Bash.",
+    "Search file contents using ripgrep-style regex. Supports glob filters, content/files-with-matches/count output, line numbers, context lines, and multiline mode. Prefer this over `grep` via Bash.",
   needsPermission: false,
   mutates: false,
   parameters: {
@@ -38,6 +39,10 @@ export const grepTool: Tool<{
       "-B": { type: "number", description: "Lines of context before match" },
       "-C": { type: "number", description: "Lines of context around match" },
       head_limit: { type: "number", description: "Limit output to N lines" },
+      multiline: {
+        type: "boolean",
+        description: "Enable multiline regex mode (-U). Patterns may span newlines.",
+      },
     },
     required: ["pattern"],
   },
@@ -54,6 +59,11 @@ export const grepTool: Tool<{
     if (input["-C"] !== undefined) args.push("-C", String(input["-C"]));
     if (input.glob) args.push("--glob", input.glob);
     if (input.type) args.push("--type", input.type);
+    if (input.multiline) args.push("-U", "--multiline-dotall");
+    // Cap matches at ripgrep level when possible — saves memory on huge result sets.
+    if (input.head_limit && mode === "content") {
+      args.push("--max-count", String(input.head_limit));
+    }
 
     args.push(input.pattern);
     args.push(path.resolve(input.path ?? ctx.config.workdir));

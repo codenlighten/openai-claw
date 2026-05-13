@@ -6,10 +6,15 @@ const MAX_LINES = 2000;
 const MAX_LINE_LEN = 2000;
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff"]);
 
-export const readTool: Tool<{ file_path: string; offset?: number; limit?: number }> = {
+export const readTool: Tool<{
+  file_path: string;
+  offset?: number;
+  limit?: number;
+  pages?: string;
+}> = {
   name: "Read",
   description:
-    "Read a file from the local filesystem. Use absolute paths. Returns lines prefixed with line numbers (cat -n format). Use offset/limit for large files.",
+    "Read a file from the local filesystem. Use absolute paths. Text files return lines prefixed with line numbers (cat -n format); use offset/limit for large files. .pdf files extract text (use `pages` like '1-5'); .ipynb files return cell sources and outputs.",
   needsPermission: false,
   mutates: false,
   parameters: {
@@ -18,6 +23,7 @@ export const readTool: Tool<{ file_path: string; offset?: number; limit?: number
       file_path: { type: "string", description: "Absolute path to the file" },
       offset: { type: "number", description: "Line number to start reading from (1-indexed)" },
       limit: { type: "number", description: "Number of lines to read (default 2000)" },
+      pages: { type: "string", description: "Page range for PDFs, e.g. '1-5' or '3'" },
     },
     required: ["file_path"],
   },
@@ -35,6 +41,13 @@ export const readTool: Tool<{ file_path: string; offset?: number; limit?: number
           `If the image was already attached to the user's message, just look at it. ` +
           `If not, ask the user to attach it via @${path.basename(fp)} or /img.`
       );
+    }
+
+    if (ext === ".pdf") {
+      return readPdf(fp, input.pages);
+    }
+    if (ext === ".ipynb") {
+      return readNotebook(fp);
     }
 
     if (stat.size > 10 * 1024 * 1024 && !input.limit) {
@@ -59,3 +72,67 @@ export const readTool: Tool<{ file_path: string; offset?: number; limit?: number
   },
   preview: (input) => `Read ${input.file_path}`,
 };
+
+async function readPdf(fp: string, pages?: string) {
+  try {
+    const mod = (await import("pdf-parse")) as any;
+    const pdf = mod.default ?? mod;
+    const data = await pdf(fs.readFileSync(fp));
+    if (!pages) {
+      if (data.numpages > 10) {
+        return err(
+          `PDF has ${data.numpages} pages. Provide a 'pages' range (e.g. '1-5') to limit extraction.`
+        );
+      }
+      return ok(data.text || "(empty PDF)");
+    }
+    // pdf-parse doesn't expose per-page text directly without a hook, so we approximate by
+    // splitting on form-feed (\f) which pdf-parse inserts between pages.
+    const allPages = (data.text || "").split("\f");
+    const [from, to] = parsePageRange(pages, allPages.length);
+    if (from < 1 || from > allPages.length) {
+      return err(`pages out of range — PDF has ${allPages.length} page(s).`);
+    }
+    const slice = allPages.slice(from - 1, to);
+    return ok(slice.map((p: string, i: number) => `--- Page ${from + i} ---\n${p}`).join("\n\n"));
+  } catch (e: any) {
+    return err(`PDF read failed: ${e?.message ?? String(e)}`);
+  }
+}
+
+function parsePageRange(spec: string, total: number): [number, number] {
+  const m = spec.match(/^(\d+)(?:-(\d+))?$/);
+  if (!m) return [1, total];
+  const from = parseInt(m[1], 10);
+  const to = m[2] ? parseInt(m[2], 10) : from;
+  return [from, Math.min(to, total)];
+}
+
+function readNotebook(fp: string) {
+  try {
+    const nb = JSON.parse(fs.readFileSync(fp, "utf8"));
+    const cells = Array.isArray(nb.cells) ? nb.cells : [];
+    const out: string[] = [];
+    cells.forEach((cell: any, i: number) => {
+      const src = Array.isArray(cell.source) ? cell.source.join("") : String(cell.source ?? "");
+      out.push(`[cell ${i + 1} type=${cell.cell_type}]\n${src}`);
+      if (cell.cell_type === "code" && Array.isArray(cell.outputs) && cell.outputs.length) {
+        const outs = cell.outputs
+          .map((o: any) => {
+            if (o.text) return Array.isArray(o.text) ? o.text.join("") : String(o.text);
+            if (o.data?.["text/plain"]) {
+              const t = o.data["text/plain"];
+              return Array.isArray(t) ? t.join("") : String(t);
+            }
+            return "";
+          })
+          .filter(Boolean)
+          .join("\n");
+        if (outs) out.push(`[cell ${i + 1} output]\n${outs}`);
+      }
+    });
+    return ok(out.join("\n\n") || "(empty notebook)");
+  } catch (e: any) {
+    return err(`Notebook parse failed: ${e?.message ?? String(e)}`);
+  }
+}

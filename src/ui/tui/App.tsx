@@ -163,7 +163,6 @@ export function App({ agent, config, permissions, hooks }: AppProps) {
           push(item);
           liveToolRef.current = item;
           setLiveTool(null);
-          hooks.run("PreToolUse", { tool_name: d.name, tool_input: d.input });
           break;
         }
         case "tool_progress": {
@@ -187,13 +186,20 @@ export function App({ agent, config, permissions, hooks }: AppProps) {
             isError: !!d.isError,
             display: d.display,
           });
-          hooks.run("PostToolUse", { tool_name: d.name, tool_output: d.content, is_error: d.isError ?? false });
           break;
         }
         case "usage": {
           const u = evt.data as { total_tokens: number; totalCostUSD?: number };
           setTotalTokens((t) => t + u.total_tokens);
           if (typeof u.totalCostUSD === "number") setTotalCostUSD(u.totalCostUSD);
+          break;
+        }
+        case "compaction": {
+          const d = evt.data as { beforeTokens?: number; afterTokens?: number; skipped?: string };
+          const text = d.skipped
+            ? `▼ compaction skipped: ${d.skipped}`
+            : `▼ context compacted ${d.beforeTokens}→${d.afterTokens} tokens`;
+          push({ kind: "system", id: nextId(), text });
           break;
         }
         case "error":

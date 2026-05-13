@@ -15,6 +15,8 @@ function cfg(overrides: Partial<ClawConfig> = {}): ClawConfig {
     contextWindow: 0,
     compactThreshold: 1,
     permissionMode: "ask",
+    maxTurns: 50,
+    maxToolResultChars: 50_000,
     ...overrides,
   };
 }

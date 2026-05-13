@@ -77,6 +77,12 @@ function describe(tool: string, input: unknown): string {
   return tool;
 }
 
+// Permission rule syntax accepted by matchesAny:
+//   "Read"            — exact tool name (matches the bare key "Read")
+//   "Bash"            — any Bash invocation (matches "Bash(<anything>)")
+//   "Bash:*"          — same as above (prefix wildcard)
+//   "Bash(npm:*)"     — Bash where the first token starts with "npm"
+//   "Bash(npm test)"  — exact described key
 function matchesAny(key: string, patterns: string[]): boolean {
   for (const pat of patterns) {
     if (pat === key) return true;

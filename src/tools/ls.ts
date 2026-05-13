@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { minimatch } from "minimatch";
 import { type Tool, ok, err } from "./types.js";
 
 export const lsTool: Tool<{ path: string; ignore?: string[] }> = {
@@ -27,7 +28,7 @@ export const lsTool: Tool<{ path: string; ignore?: string[] }> = {
     const entries = fs.readdirSync(p, { withFileTypes: true });
     const ignore = input.ignore ?? [];
     const lines = entries
-      .filter((e) => !ignore.some((g) => e.name.includes(g)))
+      .filter((e) => !ignore.some((g) => minimatch(e.name, g, { dot: true })))
       .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
       .sort();
     return ok(lines.join("\n") || "(empty)");

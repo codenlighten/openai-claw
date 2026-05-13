@@ -3,7 +3,7 @@ import chalk from "chalk";
 import type { Agent, AgentEvent } from "../agent.js";
 import type { ClawConfig } from "../config.js";
 import type { PermissionManager } from "../permissions/index.js";
-import { findCommand } from "../commands/index.js";
+import { findCommand, builtinCommands } from "../commands/index.js";
 import { HookRunner } from "../hooks/index.js";
 import { prepareUserMessage } from "../input.js";
 import { saveSession } from "../session.js";
@@ -15,12 +15,25 @@ export interface ReplOptions {
 }
 
 export async function startRepl({ agent, config, permissions }: ReplOptions): Promise<void> {
+  const completer = (line: string): [string[], string] => {
+    if (!line.startsWith("/")) return [[], line];
+    const prefix = line.slice(1).split(/\s+/)[0] ?? "";
+    const matches = builtinCommands
+      .map((c) => `/${c.name}`)
+      .filter((n) => n.slice(1).startsWith(prefix));
+    return [matches, line];
+  };
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
     terminal: true,
     historySize: 500,
+    completer,
   });
+
+  // Multi-line input: a single trailing backslash on a line continues to the next.
+  let multilineBuffer: string[] | null = null;
 
   const hooks = new HookRunner(config);
   await hooks.run("SessionStart", { workdir: config.workdir });
@@ -62,7 +75,19 @@ export async function startRepl({ agent, config, permissions }: ReplOptions): Pr
 
   for await (const line of rl) {
     if (exiting) break;
-    const input = line.trim();
+    // Multi-line continuation: a trailing backslash means "more lines follow".
+    if (multilineBuffer || line.endsWith("\\")) {
+      const trimmed = line.endsWith("\\") ? line.slice(0, -1) : line;
+      if (!multilineBuffer) multilineBuffer = [];
+      multilineBuffer.push(trimmed);
+      if (line.endsWith("\\")) {
+        rl.setPrompt(chalk.cyan("» "));
+        rl.prompt();
+        continue;
+      }
+    }
+    const input = (multilineBuffer ? multilineBuffer.join("\n") : line).trim();
+    multilineBuffer = null;
     if (!input) {
       prompt();
       continue;
@@ -150,7 +175,6 @@ function makeEventHandler(hooks: HookRunner) {
       case "tool_call": {
         const d = evt.data as { name: string; input: any; preview?: string };
         process.stdout.write("\n" + chalk.blue(`▸ ${d.preview ?? d.name}`) + "\n");
-        hooks.run("PreToolUse", { tool_name: d.name, tool_input: d.input });
         break;
       }
       case "tool_result": {
@@ -159,11 +183,17 @@ function makeEventHandler(hooks: HookRunner) {
         const tail = d.content.split("\n").length > 8 ? chalk.dim("\n  …") : "";
         const color = d.isError ? chalk.red : chalk.dim;
         process.stdout.write(color("  " + head.split("\n").join("\n  ")) + tail + "\n");
-        hooks.run("PostToolUse", {
-          tool_name: d.name,
-          tool_output: d.content,
-          is_error: d.isError ?? false,
-        });
+        break;
+      }
+      case "compaction": {
+        const d = evt.data as { beforeTokens?: number; afterTokens?: number; skipped?: string };
+        if (d.skipped) {
+          process.stdout.write("\n" + chalk.dim(`▼ compaction skipped: ${d.skipped}`) + "\n");
+        } else {
+          process.stdout.write(
+            "\n" + chalk.dim(`▼ context compacted ${d.beforeTokens}→${d.afterTokens} tokens`) + "\n"
+          );
+        }
         break;
       }
       case "error":

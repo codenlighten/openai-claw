@@ -9,11 +9,10 @@ export const bashTool: Tool<{
   command: string;
   description?: string;
   timeout?: number;
-  run_in_background?: boolean;
 }> = {
   name: "Bash",
   description:
-    "Execute a bash command. Working directory persists, shell state does not. Always quote paths with spaces. Output is truncated at 100k chars. Timeout defaults to 120s (max 600s).",
+    "Execute a bash command. Working directory persists, shell state does not. Always quote paths with spaces. Output is truncated at 100k chars. Timeout defaults to 120s (max 600s). Commands run synchronously — there is no background mode.",
   needsPermission: true,
   mutates: true,
   parameters: {
@@ -22,7 +21,6 @@ export const bashTool: Tool<{
       command: { type: "string", description: "The bash command to execute" },
       description: { type: "string", description: "Brief description of what the command does" },
       timeout: { type: "number", description: "Timeout in ms (max 600000)" },
-      run_in_background: { type: "boolean", description: "Run in background (returns immediately)" },
     },
     required: ["command"],
   },
@@ -34,7 +32,6 @@ export const bashTool: Tool<{
         cwd,
         env: process.env,
         stdio: ["ignore", "pipe", "pipe"],
-        detached: !!input.run_in_background,
       });
       let stdout = "";
       let stderr = "";
@@ -56,13 +53,6 @@ export const bashTool: Tool<{
         } catch {}
       };
       ctx.abortSignal?.addEventListener("abort", abortHandler);
-
-      if (input.run_in_background) {
-        child.unref();
-        clearTimeout(timer);
-        resolve(ok(`Started background process (pid ${child.pid}).`));
-        return;
-      }
 
       child.stdout.on("data", (d) => {
         const text = d.toString();

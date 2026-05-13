@@ -227,9 +227,25 @@ export class OpenAIClient {
     } catch (e: any) {
       throw e instanceof FriendlyApiError ? e : classifyError(e);
     }
+
+    // Validate assembled tool calls — discard malformed ones rather than letting
+    // the agent reply "Tool not found" or crash on JSON.parse downstream.
+    const validTools: ToolCall[] = [];
+    for (const tc of toolCalls.values()) {
+      if (!tc.function.name) continue;
+      if (tc.function.arguments) {
+        try {
+          JSON.parse(tc.function.arguments);
+        } catch {
+          continue;
+        }
+      }
+      validTools.push(tc);
+    }
+
     return {
       content: content || null,
-      tool_calls: Array.from(toolCalls.values()),
+      tool_calls: validTools,
       finish_reason: finishReason,
       usage,
     };

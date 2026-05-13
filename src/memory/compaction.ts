@@ -30,11 +30,12 @@ export function estimateTokens(messages: ChatMessage[]): number {
 export async function compactIfNeeded(
   messages: ChatMessage[],
   config: ClawConfig,
-  client: AgentClient
+  client: AgentClient,
+  force = false
 ): Promise<ChatMessage[] | null> {
   const tokens = estimateTokens(messages);
   const limit = Math.floor(config.contextWindow * config.compactThreshold);
-  if (tokens < limit) return null;
+  if (!force && tokens < limit) return null;
 
   // Keep system + last 8 messages; summarize the middle.
   const sys = messages[0];

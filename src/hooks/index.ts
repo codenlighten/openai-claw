@@ -9,7 +9,10 @@ export type HookEvent =
   | "UserPromptSubmit"
   | "Stop"
   | "SessionStart"
-  | "SessionEnd";
+  | "SessionEnd"
+  | "PreCompact"
+  | "SubagentStop"
+  | "Notification";
 
 interface HookDefinition {
   event: HookEvent;

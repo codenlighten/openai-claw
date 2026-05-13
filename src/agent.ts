@@ -15,8 +15,27 @@ export interface AgentEvent {
     | "tool_result"
     | "usage"
     | "error"
+    | "compaction"
     | "done";
   data?: any;
+}
+
+export interface HookOutcome {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  blocked: boolean;
+}
+
+export type HookCallback = (
+  event: "PreCompact" | "SubagentStop" | "Notification" | "PreToolUse" | "PostToolUse",
+  payload: Record<string, unknown>
+) => Promise<HookOutcome[]>;
+
+function truncateForModel(s: string, cap: number): string {
+  if (s.length <= cap) return s;
+  const dropped = s.length - cap;
+  return s.slice(0, cap) + `\n[truncated: ${dropped} chars dropped — re-run with narrower args]`;
 }
 
 export type AgentEventHandler = (event: AgentEvent) => void;
@@ -38,6 +57,8 @@ export interface AgentOptions {
   systemPromptExtras?: string[];
   /** Inject a custom client (mainly for tests). Defaults to a real OpenAIClient. */
   client?: AgentClient;
+  /** Optional hook runner. Used to fire PreCompact / SubagentStop / Notification. */
+  runHook?: HookCallback;
 }
 
 export class Agent {
@@ -78,6 +99,15 @@ export class Agent {
     this.messages.push({ role: "user", content });
   }
 
+  /** Force a compaction pass right now, regardless of threshold. Returns [before, after] tokens or null. */
+  async forceCompact(): Promise<{ before: number; after: number } | null> {
+    const before = estimateTokens(this.messages);
+    const compacted = await compactIfNeeded(this.messages, this.opts.config, this.client, true);
+    if (!compacted) return null;
+    this.messages = compacted;
+    return { before, after: estimateTokens(this.messages) };
+  }
+
   clear(keepSystem = true): void {
     if (keepSystem && this.messages[0]?.role === "system") {
       this.messages = [this.messages[0]];
@@ -97,15 +127,42 @@ export class Agent {
       spawnSubagent: this.opts.spawnSubagent,
     };
 
+    const maxTurns = this.opts.config.maxTurns;
+    let turn = 0;
+
     while (true) {
       if (abortSignal?.aborted) {
         handler({ type: "error", data: "aborted" });
         return;
       }
 
-      // Compact context if approaching limit.
+      if (turn >= maxTurns) {
+        handler({
+          type: "error",
+          data: `max turns reached (${maxTurns}). Use /config or settings.json to raise the limit.`,
+        });
+        return;
+      }
+      turn++;
+
+      // Compact context if approaching limit. PreCompact hook may veto.
+      const before = estimateTokens(this.messages);
+      if (this.opts.runHook) {
+        const outcomes = await this.opts.runHook("PreCompact", {
+          tokens: before,
+          limit: Math.floor(this.opts.config.contextWindow * this.opts.config.compactThreshold),
+        });
+        const blocked = outcomes.some((o) => o.blocked);
+        if (blocked) {
+          handler({ type: "compaction", data: { skipped: "blocked by PreCompact hook" } });
+        }
+      }
       const compacted = await compactIfNeeded(this.messages, this.opts.config, this.client);
-      if (compacted) this.messages = compacted;
+      if (compacted) {
+        const after = estimateTokens(compacted);
+        this.messages = compacted;
+        handler({ type: "compaction", data: { beforeTokens: before, afterTokens: after } });
+      }
 
       let completion;
       try {
@@ -145,14 +202,17 @@ export class Agent {
         return;
       }
 
-      // Execute all tool calls.
-      for (const call of completion.tool_calls) {
-        const result = await this.executeTool(call, ctx, handler);
+      // Execute all tool calls in parallel; preserve original order when appending tool messages.
+      const results = await Promise.all(
+        completion.tool_calls.map((call) => this.executeTool(call, ctx, handler))
+      );
+      for (let i = 0; i < completion.tool_calls.length; i++) {
+        const call = completion.tool_calls[i];
         this.messages.push({
           role: "tool",
           tool_call_id: call.id,
           name: call.function.name,
-          content: result,
+          content: truncateForModel(results[i], this.opts.config.maxToolResultChars),
         });
       }
     }
@@ -184,6 +244,20 @@ export class Agent {
       data: { name: tool.name, input: parsedInput, preview: tool.preview?.(parsedInput), callId: call.id },
     });
 
+    // PreToolUse hook — exit code 2 vetoes the call entirely.
+    if (this.opts.runHook) {
+      const outcomes = await this.opts.runHook("PreToolUse", {
+        tool_name: tool.name,
+        tool_input: parsedInput,
+      });
+      const blocked = outcomes.find((o) => o.blocked);
+      if (blocked) {
+        const msg = `Blocked by PreToolUse hook: ${blocked.stderr.trim() || "(no message)"}`;
+        handler({ type: "tool_result", data: { name: tool.name, content: msg, isError: true, callId: call.id } });
+        return msg;
+      }
+    }
+
     // Permission check.
     if (tool.needsPermission) {
       const decision = await ctx.permissionCheck(tool.name, parsedInput);
@@ -194,6 +268,8 @@ export class Agent {
       }
     }
 
+    let resultContent = "";
+    let resultIsError = false;
     try {
       const runCtx: ToolContext = {
         ...ctx,
@@ -202,15 +278,27 @@ export class Agent {
           handler({ type: "tool_progress", data: { callId: call.id, name: tool.name, chunk } }),
       };
       const result = await tool.run(parsedInput, runCtx);
+      resultContent = result.content;
+      resultIsError = !!result.isError;
       handler({
         type: "tool_result",
         data: { name: tool.name, content: result.content, isError: result.isError, display: result.display, callId: call.id },
       });
-      return result.content;
     } catch (e: any) {
-      const msg = `Error in ${tool.name}: ${e?.message ?? String(e)}`;
-      handler({ type: "tool_result", data: { name: tool.name, content: msg, isError: true } });
-      return msg;
+      resultContent = `Error in ${tool.name}: ${e?.message ?? String(e)}`;
+      resultIsError = true;
+      handler({ type: "tool_result", data: { name: tool.name, content: resultContent, isError: true } });
     }
+
+    if (this.opts.runHook) {
+      await this.opts.runHook("PostToolUse", {
+        tool_name: tool.name,
+        tool_input: parsedInput,
+        tool_output: resultContent,
+        is_error: resultIsError,
+      });
+    }
+
+    return resultContent;
   }
 }

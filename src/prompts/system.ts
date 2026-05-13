@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ClawConfig } from "../config.js";
 import type { Tool } from "../tools/types.js";
+import { listMemories } from "../memory/index.js";
 
 export interface SystemPromptOptions {
   config: ClawConfig;
@@ -13,7 +14,7 @@ export interface SystemPromptOptions {
 
 export function buildSystemPrompt(opts: SystemPromptOptions): string {
   const { config, tools, extras = [], variant = "main" } = opts;
-  const toolList = tools.map((t) => `- ${t.name}: ${t.description}`).join("\n");
+  const toolList = formatToolList(tools);
 
   const date = new Date().toISOString().split("T")[0];
   const env = [
@@ -85,6 +86,31 @@ ${extras.length ? `\n# Session\n${extras.join("\n")}` : ""}`;
   return base;
 }
 
+function formatToolList(tools: Tool[]): string {
+  const builtin = tools.filter((t) => !t.name.startsWith("mcp__") && t.name !== "Task");
+  const mcp = tools.filter((t) => t.name.startsWith("mcp__"));
+  const subagent = tools.filter((t) => t.name === "Task");
+
+  const lines: string[] = [];
+  if (builtin.length) {
+    lines.push("## Built-in tools");
+    for (const t of builtin) lines.push(`- ${t.name}: ${t.description}`);
+  }
+  if (subagent.length) {
+    lines.push("\n## Subagents");
+    for (const t of subagent) lines.push(`- ${t.name}: ${t.description}`);
+  }
+  if (mcp.length) {
+    lines.push("\n## MCP tools");
+    for (const t of mcp) {
+      // First sentence only — MCP tools often ship verbose descriptions.
+      const summary = t.description.split(/(?<=[.!?])\s/)[0];
+      lines.push(`- ${t.name}: ${summary}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 function loadProjectInstructions(workdir: string): string {
   const candidates = [path.join(workdir, "CLAUDE.md"), path.join(workdir, ".claw", "CLAW.md")];
   for (const p of candidates) {
@@ -98,12 +124,30 @@ function loadProjectInstructions(workdir: string): string {
 }
 
 function loadMemoryContext(config: ClawConfig): string {
-  const idx = path.join(config.memoryDir, "MEMORY.md");
-  if (!fs.existsSync(idx)) return "";
-  try {
-    const text = fs.readFileSync(idx, "utf8");
-    return text.split("\n").slice(0, 200).join("\n");
-  } catch {
-    return "";
+  const entries = listMemories(config);
+  if (entries.length === 0) return "";
+  const priority: Record<string, number> = { user: 0, feedback: 1, project: 2, reference: 3 };
+  const sorted = [...entries].sort((a, b) => (priority[a.type] ?? 4) - (priority[b.type] ?? 4));
+
+  const MAX_CHARS = 32_000; // ~8k tokens at 4 chars/token
+  const parts: string[] = [];
+  let used = 0;
+  for (const e of sorted) {
+    const block = `## ${e.name} (${e.type})\n${e.description ? e.description + "\n\n" : ""}${e.body}`;
+    if (used + block.length > MAX_CHARS) {
+      parts.push(`…${entries.length - parts.length} more memory entries truncated.`);
+      break;
+    }
+    parts.push(block);
+    used += block.length;
   }
+
+  const idx = path.join(config.memoryDir, "MEMORY.md");
+  let header = "";
+  if (fs.existsSync(idx)) {
+    try {
+      header = fs.readFileSync(idx, "utf8").trim() + "\n\n";
+    } catch {}
+  }
+  return header + parts.join("\n\n---\n\n");
 }

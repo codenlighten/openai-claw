@@ -27,7 +27,7 @@ export const globTool: Tool<{ pattern: string; path?: string }> = {
     });
     const sorted = entries
       .map((p) => ({ p, mtime: fs.statSync(p).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime)
+      .sort((a, b) => (b.mtime - a.mtime) || a.p.localeCompare(b.p))
       .map((x) => x.p);
     return ok(sorted.length === 0 ? "(no matches)" : sorted.join("\n"));
   },
