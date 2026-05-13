@@ -16,12 +16,18 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
   const { config, tools, extras = [], variant = "main" } = opts;
   const toolList = formatToolList(tools);
 
-  const date = new Date().toISOString().split("T")[0];
-  const env = [
+  // Cache-friendly layout: keep workdir + platform info (stable for the session)
+  // before any project / memory content, and push volatile bits (date, model id,
+  // memory, extras) to the very end so the cached prefix survives /remember and
+  // model switches.
+  const stableEnv = [
     `Primary working directory: ${config.workdir}`,
     `Platform: ${os.platform()}`,
     `Shell: ${process.env.SHELL ?? "/bin/sh"}`,
     `OS Version: ${os.release()}`,
+  ].join("\n");
+  const date = new Date().toISOString().split("T")[0];
+  const volatileEnv = [
     `Today's date: ${date}`,
     `You are powered by OpenAI's '${config.model}' model.`,
   ].join("\n");
@@ -72,10 +78,13 @@ ${toolList}
 - When an image is already attached to the user's message, do NOT call the Read tool on the image file path — Read returns the raw binary bytes, which are useless to you. Use the attached image directly. Only call Read on the image's file path if the user explicitly asks you to inspect the file's bytes (e.g. checking a header or magic number).
 
 # Environment
-${env}
+${stableEnv}
 ${claudeMd ? `\n# Project instructions (from CLAUDE.md)\n${claudeMd}` : ""}
+
+# Session
+${volatileEnv}
 ${memoryContext ? `\n# Persistent memory\n${memoryContext}` : ""}
-${extras.length ? `\n# Session\n${extras.join("\n")}` : ""}`;
+${extras.length ? `\n${extras.join("\n")}` : ""}`;
 
   if (variant === "subagent-general") {
     return `${base}\n\n# Subagent context\nYou are a subagent. Return a concise final summary of your findings. You will be invoked once with a self-contained prompt — there is no follow-up turn.`;

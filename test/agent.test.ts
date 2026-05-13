@@ -19,6 +19,7 @@ function cfg(overrides: Partial<ClawConfig> = {}): ClawConfig {
     permissionMode: "bypassPermissions",
     maxTurns: 50,
     maxToolResultChars: 50_000,
+    models: {},
     ...overrides,
   };
 }
@@ -40,7 +41,7 @@ function textOnly(content: string): CompletionResult {
     content,
     tool_calls: [],
     finish_reason: "stop",
-    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cached_tokens: 0 },
   };
 }
 
@@ -53,7 +54,7 @@ function withToolCalls(calls: { id: string; name: string; arguments: any }[]): C
       function: { name: c.name, arguments: JSON.stringify(c.arguments) },
     })),
     finish_reason: "tool_calls",
-    usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+    usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30, cached_tokens: 0 },
   };
 }
 
@@ -249,6 +250,58 @@ describe("Agent.run", () => {
     expect(agent.usage.totalTokens).toBe(15);
     expect(agent.usage.totalCostUSD).toBeGreaterThan(0);
     expect(agent.usage.totalCostUSD).toBeLessThan(0.001);
+  });
+
+  it("routes the next turn through the requested model role", async () => {
+    const seen: (string | undefined)[] = [];
+    const client: AgentClient = {
+      async complete(_msgs, _tools, opts) {
+        seen.push(opts?.modelRole);
+        return textOnly("ok");
+      },
+    };
+    const agent = new Agent({
+      config: cfg({ model: "x", models: { default: "x", reasoning: "y" } }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.setNextRole("reasoning");
+    agent.pushUser("hard one");
+    const { handler } = collect();
+    await agent.run(handler);
+    agent.pushUser("ordinary");
+    await agent.run(handler);
+    expect(seen).toEqual(["reasoning", "default"]);
+  });
+
+  it("tracks cached-token hit rate across turns", async () => {
+    const turn1 = {
+      content: "first",
+      tool_calls: [],
+      finish_reason: "stop",
+      usage: { prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010, cached_tokens: 0 },
+    };
+    const turn2 = {
+      content: "second",
+      tool_calls: [],
+      finish_reason: "stop",
+      usage: { prompt_tokens: 1100, completion_tokens: 10, total_tokens: 1110, cached_tokens: 900 },
+    };
+    const client = new ScriptedClient([turn1, turn2]);
+    const agent = new Agent({
+      config: cfg(),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.pushUser("a");
+    const { handler } = collect();
+    await agent.run(handler);
+    agent.pushUser("b");
+    await agent.run(handler);
+    expect(agent.usage.totalCachedTokens).toBe(900);
+    expect(agent.usage.cacheHitRate).toBeCloseTo(900 / 2100, 2);
   });
 
   it("preserves tool-call order when running tools in parallel", async () => {

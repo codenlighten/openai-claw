@@ -96,13 +96,15 @@ async function main() {
     systemPromptExtras,
   });
 
+  let printSessionId: string | undefined;
   if (argv.continue) {
     try {
       const { loadSession } = await import("./session.js");
       const data = loadSession(config);
       if (data) {
         agent.replaceConversation(data.messages);
-        console.error(chalk.dim(`[resumed ${data.messages.length} message(s) from ${data.savedAt}]`));
+        printSessionId = data.id;
+        console.error(chalk.dim(`[resumed ${data.messages.length} message(s) from session ${data.id} (${data.savedAt})]`));
       } else {
         console.error(chalk.dim("[no saved session to resume]"));
       }
@@ -136,7 +138,7 @@ async function main() {
       }
     });
     process.stdout.write("\n");
-    try { saveSession(config, agent.conversation); } catch {}
+    try { saveSession(config, agent.conversation, printSessionId); } catch {}
     await disconnectAll();
     if (sawError) process.exit(1);
     return;

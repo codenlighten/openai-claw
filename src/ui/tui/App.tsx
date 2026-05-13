@@ -71,6 +71,8 @@ export function App({ agent, config, permissions, hooks }: AppProps) {
     setHistory((h) => [...h, item]);
   }
 
+  const sessionRef = useRef<{ current?: string }>({});
+
   async function submit(text: string) {
     setInput("");
     if (!text.trim()) return;
@@ -88,7 +90,7 @@ export function App({ agent, config, permissions, hooks }: AppProps) {
       const original = console.log;
       console.log = (...a: any[]) => buf.push(a.map(String).join(" "));
       try {
-        await cmd.run(args, { agent, config, permissions, exit });
+        await cmd.run(args, { agent, config, permissions, exit, sessionRef: sessionRef.current });
       } finally {
         console.log = original;
       }
@@ -220,7 +222,10 @@ export function App({ agent, config, permissions, hooks }: AppProps) {
       setStreamingItem(null);
       aborterRef.current = null;
       setBusy(false);
-      try { saveSession(config, agent.conversation); } catch {}
+      try {
+        const { id } = saveSession(config, agent.conversation, sessionRef.current.current);
+        sessionRef.current.current = id;
+      } catch {}
     }
   }
 

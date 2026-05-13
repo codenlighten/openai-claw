@@ -10,6 +10,7 @@ import { webFetchTool } from "./webfetch.js";
 import { webSearchTool } from "./websearch.js";
 import { taskTool } from "./task.js";
 import { todoWriteTool } from "./todo.js";
+import { bashOutputTool, killShellTool } from "./shell.js";
 
 export function getAllTools(): Tool[] {
   return [
@@ -17,6 +18,8 @@ export function getAllTools(): Tool[] {
     writeTool,
     editTool,
     bashTool,
+    bashOutputTool,
+    killShellTool,
     grepTool,
     globTool,
     lsTool,

@@ -1,6 +1,10 @@
 import OpenAI from "openai";
-import type { ClawConfig } from "./config.js";
+import type { ClawConfig, ModelRole } from "./config.js";
 import type { Tool } from "./tools/types.js";
+
+export function resolveModel(config: ClawConfig, role: ModelRole = "default"): string {
+  return config.models?.[role] ?? config.model;
+}
 
 export class FriendlyApiError extends Error {
   readonly retryable: boolean;
@@ -102,6 +106,7 @@ export interface CompletionResult {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    cached_tokens: number;
   };
 }
 
@@ -117,7 +122,13 @@ export class OpenAIClient {
   async complete(
     messages: ChatMessage[],
     tools: Tool[],
-    opts: { abortSignal?: AbortSignal; stream?: boolean; onDelta?: (text: string) => void } = {}
+    opts: {
+      abortSignal?: AbortSignal;
+      stream?: boolean;
+      onDelta?: (text: string) => void;
+      modelRole?: ModelRole;
+      model?: string;
+    } = {}
   ): Promise<CompletionResult> {
     const toolDefs = tools.map((t) => ({
       type: "function" as const,
@@ -128,8 +139,9 @@ export class OpenAIClient {
       },
     }));
 
+    const model = opts.model ?? resolveModel(this.config, opts.modelRole);
     const body: any = {
-      model: this.config.model,
+      model,
       messages: messages as any,
       tools: toolDefs.length > 0 ? toolDefs : undefined,
       tool_choice: toolDefs.length > 0 ? "auto" : undefined,
@@ -168,6 +180,7 @@ export class OpenAIClient {
             prompt_tokens: response.usage.prompt_tokens,
             completion_tokens: response.usage.completion_tokens,
             total_tokens: response.usage.total_tokens,
+            cached_tokens: (response.usage as any).prompt_tokens_details?.cached_tokens ?? 0,
           }
         : undefined,
     };
@@ -198,6 +211,7 @@ export class OpenAIClient {
             prompt_tokens: chunk.usage.prompt_tokens,
             completion_tokens: chunk.usage.completion_tokens,
             total_tokens: chunk.usage.total_tokens,
+            cached_tokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
           };
         }
         continue;

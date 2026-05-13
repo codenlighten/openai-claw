@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { type Tool, ok, err } from "./types.js";
+import { spawnBackgroundShell } from "./shell.js";
 
 const DEFAULT_TIMEOUT = 120_000;
 const MAX_TIMEOUT = 600_000;
@@ -9,10 +10,11 @@ export const bashTool: Tool<{
   command: string;
   description?: string;
   timeout?: number;
+  run_in_background?: boolean;
 }> = {
   name: "Bash",
   description:
-    "Execute a bash command. Working directory persists, shell state does not. Always quote paths with spaces. Output is truncated at 100k chars. Timeout defaults to 120s (max 600s). Commands run synchronously — there is no background mode.",
+    "Execute a bash command. Working directory persists, shell state does not. Always quote paths with spaces. Output is truncated at 100k chars. Timeout defaults to 120s (max 600s). Set run_in_background=true to start a long-running shell and get back a shell_id; poll it with BashOutput and stop it with KillShell.",
   needsPermission: true,
   mutates: true,
   parameters: {
@@ -21,10 +23,17 @@ export const bashTool: Tool<{
       command: { type: "string", description: "The bash command to execute" },
       description: { type: "string", description: "Brief description of what the command does" },
       timeout: { type: "number", description: "Timeout in ms (max 600000)" },
+      run_in_background: { type: "boolean", description: "Run as a background shell; returns a shell_id for BashOutput/KillShell" },
     },
     required: ["command"],
   },
   async run(input, ctx) {
+    if (input.run_in_background) {
+      const shell = spawnBackgroundShell(ctx.config, input.command);
+      return ok(
+        `Started background shell ${shell.id} (pid ${shell.pid}).\nUse BashOutput(shell_id="${shell.id}") to poll, KillShell to stop.`
+      );
+    }
     const timeout = Math.min(input.timeout ?? DEFAULT_TIMEOUT, MAX_TIMEOUT);
     const cwd = ctx.config.workdir;
     return new Promise((resolve) => {

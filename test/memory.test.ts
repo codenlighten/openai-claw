@@ -20,6 +20,7 @@ const cfg = (): ClawConfig => ({
   permissionMode: "ask",
   maxTurns: 50,
   maxToolResultChars: 50_000,
+  models: {},
 });
 
 beforeEach(() => {

@@ -2,8 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
+export type ModelRole = "default" | "cheap" | "reasoning";
+
 export interface ClawConfig {
   model: string;
+  /**
+   * Optional per-role model overrides. The agent loop and explicit /model role
+   * commands consult this map. If a role is missing, falls back to `model`.
+   */
+  models: Partial<Record<ModelRole, string>>;
   apiKey: string;
   baseURL?: string;
   maxTokens?: number;
@@ -28,6 +35,9 @@ const DEFAULTS = {
   permissionMode: "ask" as const,
   maxTurns: 50,
   maxToolResultChars: 50_000,
+  models: { cheap: "gpt-5-nano", default: "gpt-5-nano", reasoning: "gpt-5" } as Partial<
+    Record<ModelRole, string>
+  >,
 };
 
 function resolveProjectDir(workdir: string): string {
@@ -69,6 +79,7 @@ export function loadConfig(overrides: Partial<ClawConfig> = {}): ClawConfig {
     deniedTools: [...(userSettings.deniedTools ?? []), ...(projectSettings.deniedTools ?? [])],
     maxTurns: projectSettings.maxTurns ?? userSettings.maxTurns ?? DEFAULTS.maxTurns,
     maxToolResultChars: projectSettings.maxToolResultChars ?? userSettings.maxToolResultChars ?? DEFAULTS.maxToolResultChars,
+    models: { ...DEFAULTS.models, ...(userSettings.models ?? {}), ...(projectSettings.models ?? {}) },
     workdir,
     homeDir,
     projectDir,

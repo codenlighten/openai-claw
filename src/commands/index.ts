@@ -8,8 +8,9 @@ import { listMemories, writeMemory, deleteMemory } from "../memory/index.js";
 import { listSkills, findSkill } from "../skills/index.js";
 import { setPlanMode, planModeExtra } from "../planmode.js";
 import type { PermissionManager } from "../permissions/index.js";
-import { loadSession, saveSession } from "../session.js";
+import { loadSession, saveSession, listSessions, forkSession } from "../session.js";
 import { loadMcpServerSpecs, getMcpDirectory } from "../mcp/index.js";
+import { readCostLog, costByDay, costByModel } from "../cost.js";
 import { prepareUserMessage } from "../input.js";
 import { HookRunner } from "../hooks/index.js";
 import { spawnSync } from "node:child_process";
@@ -19,6 +20,8 @@ export interface CommandContext {
   config: ClawConfig;
   permissions: PermissionManager;
   exit: () => void;
+  /** Mutable holder for the current session id. Set after first save. */
+  sessionRef?: { current?: string };
 }
 
 export interface SlashCommand {
@@ -66,11 +69,35 @@ export const builtinCommands: SlashCommand[] = [
   },
   {
     name: "model",
-    description: "Show or set the model (e.g. /model gpt-5-nano)",
+    description:
+      "Show or set models. /model — list all. /model <name> — set default. /model <role> <name> — set role (default/cheap/reasoning). /model use <role> — use a role for the next turn.",
     run(args, ctx) {
       const arg = args.trim();
       if (!arg) {
         console.log(`current model: ${ctx.config.model}`);
+        for (const [role, name] of Object.entries(ctx.config.models ?? {})) {
+          console.log(`  ${role.padEnd(10)} → ${name}`);
+        }
+        console.log(chalk.dim("hint: /model <role> <name> or /model use <role>"));
+        return;
+      }
+      const parts = arg.split(/\s+/);
+      if (parts[0] === "use" && parts[1]) {
+        const role = parts[1] as "default" | "cheap" | "reasoning";
+        if (!["default", "cheap", "reasoning"].includes(role)) {
+          console.log(chalk.red(`unknown role: ${role}`));
+          return;
+        }
+        ctx.agent.setNextRole(role);
+        console.log(chalk.dim(`next turn will use role=${role} (${ctx.config.models?.[role] ?? ctx.config.model})`));
+        return;
+      }
+      if (parts.length === 2 && ["default", "cheap", "reasoning"].includes(parts[0])) {
+        const role = parts[0] as "default" | "cheap" | "reasoning";
+        const name = parts[1];
+        ctx.config.models = { ...(ctx.config.models ?? {}), [role]: name };
+        saveUserSetting(ctx.config, "models", ctx.config.models);
+        console.log(chalk.dim(`${role} → ${name} (saved)`));
         return;
       }
       ctx.config.model = arg;
@@ -111,11 +138,36 @@ export const builtinCommands: SlashCommand[] = [
   },
   {
     name: "cost",
-    description: "Show token usage and estimated cost",
-    run(_args, ctx) {
-      const u = ctx.agent.usage;
-      const cost = u.totalCostUSD > 0 ? ` (≈ $${u.totalCostUSD.toFixed(4)})` : " (no price table for this model)";
-      console.log(`tokens: ${u.totalTokens}${cost}`);
+    description: "Show token usage and cost. /cost — this session. /cost daily | models — historical.",
+    run(args, ctx) {
+      const arg = args.trim();
+      if (!arg) {
+        const u = ctx.agent.usage;
+        const cost = u.totalCostUSD > 0 ? `≈ $${u.totalCostUSD.toFixed(4)}` : "(no price table for this model)";
+        const cachePct = u.cacheHitRate > 0 ? ` cache=${(u.cacheHitRate * 100).toFixed(0)}%` : "";
+        console.log(
+          `tokens: ${u.totalTokens} (prompt=${u.totalPromptTokens} completion=${u.totalCompletionTokens}${cachePct})\ncost: ${cost}`
+        );
+        return;
+      }
+      const entries = readCostLog(ctx.config);
+      if (entries.length === 0) {
+        console.log(chalk.dim("(no cost log yet)"));
+        return;
+      }
+      if (arg === "daily") {
+        for (const row of costByDay(entries).slice(0, 14)) {
+          console.log(`  ${row.date}  $${row.costUSD.toFixed(4).padStart(8)}  ${row.tokens.toString().padStart(8)}t  ${row.turns}turns`);
+        }
+        return;
+      }
+      if (arg === "models") {
+        for (const row of costByModel(entries)) {
+          console.log(`  ${row.model.padEnd(18)} $${row.costUSD.toFixed(4).padStart(8)}  ${row.tokens.toString().padStart(8)}t  ${row.turns}turns`);
+        }
+        return;
+      }
+      console.log(chalk.red("usage: /cost [daily|models]"));
     },
   },
   {
@@ -226,16 +278,32 @@ export const builtinCommands: SlashCommand[] = [
   },
   {
     name: "resume",
-    description: "Resume the last saved session in this project",
-    run(_args, ctx) {
-      const data = loadSession(ctx.config);
+    description: "Resume a session. /resume — last. /resume list — show all. /resume <id> — by id.",
+    run(args, ctx) {
+      const arg = args.trim();
+      if (arg === "list") {
+        const sessions = listSessions(ctx.config);
+        if (sessions.length === 0) {
+          console.log(chalk.dim("(no sessions)"));
+          return;
+        }
+        for (const s of sessions.slice(0, 30)) {
+          console.log(
+            `  ${chalk.cyan(s.id.padEnd(40))} ${chalk.dim(s.savedAt)} ${chalk.dim(`(${s.messageCount}m)`)} ${s.preview}`
+          );
+        }
+        if (sessions.length > 30) console.log(chalk.dim(`  …and ${sessions.length - 30} more`));
+        return;
+      }
+      const data = loadSession(ctx.config, arg || undefined);
       if (!data) {
-        console.log(chalk.dim("(no saved session)"));
+        console.log(chalk.dim(arg ? `(no session with id ${arg})` : "(no saved session)"));
         return;
       }
       ctx.agent.replaceConversation(data.messages);
+      if (ctx.sessionRef) ctx.sessionRef.current = data.id;
       console.log(
-        chalk.dim(`resumed ${data.messages.length} message(s) from ${data.savedAt}`)
+        chalk.dim(`resumed ${data.messages.length} message(s) from session ${data.id} (saved ${data.savedAt})`)
       );
     },
   },
@@ -243,8 +311,18 @@ export const builtinCommands: SlashCommand[] = [
     name: "save",
     description: "Force-save the current session",
     run(_args, ctx) {
-      const file = saveSession(ctx.config, ctx.agent.conversation);
+      const { id, file } = saveSession(ctx.config, ctx.agent.conversation, ctx.sessionRef?.current);
+      if (ctx.sessionRef) ctx.sessionRef.current = id;
       console.log(chalk.dim(`saved → ${file}`));
+    },
+  },
+  {
+    name: "fork",
+    description: "Fork the current conversation as a new session id",
+    run(_args, ctx) {
+      const { id } = forkSession(ctx.config, ctx.agent.conversation);
+      if (ctx.sessionRef) ctx.sessionRef.current = id;
+      console.log(chalk.dim(`forked to ${id}`));
     },
   },
   {

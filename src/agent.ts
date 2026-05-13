@@ -1,9 +1,10 @@
 import { OpenAIClient, type ChatMessage, type ContentPart, type CompletionResult, type ToolCall } from "./client.js";
 import type { Tool, ToolContext } from "./tools/types.js";
-import type { ClawConfig } from "./config.js";
+import type { ClawConfig, ModelRole } from "./config.js";
 import { buildSystemPrompt } from "./prompts/system.js";
 import { compactIfNeeded, estimateTokens } from "./memory/compaction.js";
-import { computeCostUSD } from "./cost.js";
+import { computeCostUSD, appendCostLog } from "./cost.js";
+import { resolveModel } from "./client.js";
 
 export interface AgentEvent {
   type:
@@ -45,7 +46,13 @@ export interface AgentClient {
   complete(
     messages: ChatMessage[],
     tools: Tool[],
-    opts?: { abortSignal?: AbortSignal; stream?: boolean; onDelta?: (text: string) => void }
+    opts?: {
+      abortSignal?: AbortSignal;
+      stream?: boolean;
+      onDelta?: (text: string) => void;
+      modelRole?: ModelRole;
+      model?: string;
+    }
   ): Promise<CompletionResult>;
 }
 
@@ -66,7 +73,12 @@ export class Agent {
   private messages: ChatMessage[] = [];
   private toolsByName: Map<string, Tool>;
   private totalTokens = 0;
+  private totalCachedTokens = 0;
+  private totalPromptTokens = 0;
+  private totalCompletionTokens = 0;
   private totalCostUSD = 0;
+  /** Override the default model role for the very next turn (consumed once). */
+  private nextModelRole: ModelRole = "default";
 
   constructor(private opts: AgentOptions) {
     this.client = opts.client ?? new OpenAIClient(opts.config);
@@ -92,11 +104,23 @@ export class Agent {
   }
 
   get usage() {
-    return { totalTokens: this.totalTokens, totalCostUSD: this.totalCostUSD };
+    return {
+      totalTokens: this.totalTokens,
+      totalCachedTokens: this.totalCachedTokens,
+      totalPromptTokens: this.totalPromptTokens,
+      totalCompletionTokens: this.totalCompletionTokens,
+      totalCostUSD: this.totalCostUSD,
+      cacheHitRate: this.totalPromptTokens > 0 ? this.totalCachedTokens / this.totalPromptTokens : 0,
+    };
   }
 
   pushUser(content: string | ContentPart[]): void {
     this.messages.push({ role: "user", content });
+  }
+
+  /** Set the role used for the next agent turn. Reset to "default" automatically. */
+  setNextRole(role: ModelRole): void {
+    this.nextModelRole = role;
   }
 
   /** Force a compaction pass right now, regardless of threshold. Returns [before, after] tokens or null. */
@@ -164,11 +188,15 @@ export class Agent {
         handler({ type: "compaction", data: { beforeTokens: before, afterTokens: after } });
       }
 
+      const role: ModelRole = this.nextModelRole;
+      this.nextModelRole = "default";
+      const turnModel = resolveModel(this.opts.config, role);
       let completion;
       try {
         completion = await this.client.complete(this.messages, this.opts.tools, {
           abortSignal,
           stream: true,
+          modelRole: role,
           onDelta: (text) => handler({ type: "text_delta", data: text }),
         });
       } catch (e: any) {
@@ -178,12 +206,33 @@ export class Agent {
 
       if (completion.usage) {
         this.totalTokens += completion.usage.total_tokens;
-        this.totalCostUSD += computeCostUSD(
-          this.opts.config.model,
+        this.totalPromptTokens += completion.usage.prompt_tokens;
+        this.totalCompletionTokens += completion.usage.completion_tokens;
+        this.totalCachedTokens += completion.usage.cached_tokens;
+        const turnCost = computeCostUSD(
+          turnModel,
           completion.usage.prompt_tokens,
-          completion.usage.completion_tokens
+          completion.usage.completion_tokens,
+          completion.usage.cached_tokens
         );
-        handler({ type: "usage", data: { ...completion.usage, totalCostUSD: this.totalCostUSD } });
+        this.totalCostUSD += turnCost;
+        appendCostLog(this.opts.config, {
+          model: turnModel,
+          role,
+          prompt_tokens: completion.usage.prompt_tokens,
+          cached_tokens: completion.usage.cached_tokens,
+          completion_tokens: completion.usage.completion_tokens,
+          costUSD: turnCost,
+        });
+        handler({
+          type: "usage",
+          data: {
+            ...completion.usage,
+            totalCostUSD: this.totalCostUSD,
+            model: turnModel,
+            role,
+          },
+        });
       }
 
       // Append assistant turn (with any tool calls) to the conversation.

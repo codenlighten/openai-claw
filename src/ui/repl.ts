@@ -36,6 +36,7 @@ export async function startRepl({ agent, config, permissions }: ReplOptions): Pr
   let multilineBuffer: string[] | null = null;
 
   const hooks = new HookRunner(config);
+  const sessionRef: { current?: string } = {};
   await hooks.run("SessionStart", { workdir: config.workdir });
 
   banner(config);
@@ -100,7 +101,7 @@ export async function startRepl({ agent, config, permissions }: ReplOptions): Pr
       if (!cmd) {
         console.log(chalk.red(`unknown command: /${head}`));
       } else {
-        await cmd.run(args, { agent, config, permissions, exit });
+        await cmd.run(args, { agent, config, permissions, exit, sessionRef });
       }
       prompt();
       continue;
@@ -139,7 +140,10 @@ export async function startRepl({ agent, config, permissions }: ReplOptions): Pr
       console.log(chalk.red(`error: ${e?.message ?? String(e)}`));
     } finally {
       aborter = null;
-      try { saveSession(config, agent.conversation); } catch {}
+      try {
+        const { id } = saveSession(config, agent.conversation, sessionRef.current);
+        sessionRef.current = id;
+      } catch {}
     }
     process.stdout.write("\n");
     prompt();

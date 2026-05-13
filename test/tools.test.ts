@@ -23,6 +23,7 @@ const ctx = (): ToolContext => ({
     permissionMode: "ask",
     maxTurns: 50,
     maxToolResultChars: 50_000,
+    models: {},
   },
   permissionCheck: async () => ({ allow: true }),
 });
@@ -122,6 +123,39 @@ describe("Edit", () => {
     expect(r.isError).toBeFalsy();
     // CRLF preserved on disk.
     expect(fs.readFileSync(p, "utf8")).toBe("alpha\r\nBETA\r\ngamma\r\n");
+  });
+});
+
+describe("Bash background + BashOutput + KillShell", () => {
+  it("starts a background shell, polls output, then kills it", async () => {
+    const { bashTool } = await import("../src/tools/bash.js");
+    const { bashOutputTool, killShellTool } = await import("../src/tools/shell.js");
+
+    const c = ctx();
+    const start = await bashTool.run(
+      { command: "for i in 1 2 3; do echo line$i; sleep 0.05; done; sleep 5", run_in_background: true },
+      c
+    );
+    expect(start.isError).toBeFalsy();
+    const idMatch = String(start.content).match(/shell (sh_[a-z0-9_]+)/);
+    expect(idMatch).toBeTruthy();
+    const shellId = idMatch![1];
+
+    // Give the shell time to emit a few lines.
+    await new Promise((r) => setTimeout(r, 300));
+
+    const poll1 = await bashOutputTool.run({ shell_id: shellId }, c);
+    expect(poll1.isError).toBeFalsy();
+    expect(String(poll1.content)).toMatch(/line1/);
+
+    const kill = await killShellTool.run({ shell_id: shellId }, c);
+    expect(kill.isError).toBeFalsy();
+  });
+
+  it("BashOutput errors on unknown shell_id", async () => {
+    const { bashOutputTool } = await import("../src/tools/shell.js");
+    const r = await bashOutputTool.run({ shell_id: "sh_doesntexist" }, ctx());
+    expect(r.isError).toBe(true);
   });
 });
 
