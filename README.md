@@ -125,6 +125,10 @@ src/
 - Web search defaults to scraping DuckDuckGo HTML (rate-limited and fragile); set `OPENAI_CLAW_SEARCH_PROVIDER=tavily` for production use.
 - Permission model is simplified — allowlist patterns support `Tool` or `Bash(prefix:*)`, but not full glob semantics.
 
+## Author
+
+**Gregory J. Ward**, CTO, [SmartLedger.Technology](https://smartledger.technology)
+
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE).

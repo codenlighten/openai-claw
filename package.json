@@ -2,6 +2,26 @@
   "name": "openai-claw",
   "version": "0.1.0",
   "description": "A Claude Code clone powered by OpenAI gpt-5-nano",
+  "author": "Gregory J. Ward <codenlighten1@gmail.com> (CTO, SmartLedger.Technology)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codenlighten/openai-claw.git"
+  },
+  "homepage": "https://github.com/codenlighten/openai-claw#readme",
+  "bugs": {
+    "url": "https://github.com/codenlighten/openai-claw/issues"
+  },
+  "keywords": [
+    "ai",
+    "openai",
+    "gpt",
+    "agent",
+    "cli",
+    "claude-code",
+    "tools",
+    "mcp"
+  ],
   "type": "module",
   "bin": {
     "claw": "./dist/index.js"
