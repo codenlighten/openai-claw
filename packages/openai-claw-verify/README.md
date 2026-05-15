@@ -20,6 +20,7 @@ npm install @smartledger.technology/openai-claw-verify
 | `signature` | ML-DSA-65 (NIST FIPS-204, post-quantum) signature on `canonical-JSON(header)` verifies under the embedded public key — header is authentic |
 | `sessionAlignment` (optional) | hashing the user_prompt / assistant_text / tool_call payloads found in the session file matches the leaves' `payloadHash` values — the sidecar is bound to *this* session, not a forgery |
 | `anchorDigest` (when anchored) | the anchor's submitted digest equals `sha256(canonical-JSON(header))` — the anchor proves the **right** root |
+| `mcpProvenance` (when MCP used) | every `mcp__`-prefixed tool call has a preceding `mcp_attach` + `mcp_tool_offered` + `permission_decision` leaf in the sealed sequence |
 
 All hashes are sha256. Canonicalization is JCS-style (RFC 8785): sorted keys, no whitespace, ASCII-safe.
 

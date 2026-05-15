@@ -29,7 +29,7 @@ import { runSubagent } from "./subagent.js";
 import { startRepl } from "./ui/repl.js";
 import { startTui } from "./ui/tui/index.js";
 import { saveSession } from "./session.js";
-import { loadMcpServerSpecs, startMcpServers, disconnectAll } from "./mcp/index.js";
+import { loadMcpServerSpecs, startMcpServers, disconnectAll, getConnectedServers } from "./mcp/index.js";
 import { prepareUserMessage } from "./input.js";
 import { HookRunner } from "./hooks/index.js";
 import { loadTodos } from "./tools/todo.js";
@@ -67,6 +67,9 @@ async function main() {
     }
     if (rawArgs[0] === "identity") {
         return runIdentityCli(rawArgs.slice(1));
+    }
+    if (rawArgs[0] === "mcp") {
+        return runMcpCli(rawArgs.slice(1));
     }
     const argv = await yargs(hideBin(process.argv))
         .scriptName("claw")
@@ -154,6 +157,10 @@ async function main() {
             resumed: !!argv.continue,
             quietWhenNoIdentity: true,
         });
+        // Emit MCP-attach / tool-offer / per-server-consent leaves at session
+        // start, so any subsequent MCP tool_call leaves have provenance in
+        // front of them in the leaf sequence.
+        attestor.recordMcpServers(getConnectedServers(), trust.trustMcp);
         attestor.recordUserPrompt(promptArg);
         agent.pushUser(prepareUserMessage(promptArg, config).content);
         await agent.run((evt) => {
@@ -197,6 +204,7 @@ async function main() {
         resumed: !!argv.continue,
         quietWhenNoIdentity: true,
     });
+    sessionAttestor.recordMcpServers(getConnectedServers(), trust.trustMcp);
     if (argv.tui) {
         await startTui({ agent, config, permissions, sessionAttestor });
     }
@@ -456,6 +464,9 @@ async function runVerifyCli(args) {
     else {
         console.log(chalk.dim("  anchor: none (run `claw attest anchor <id>` to publish)"));
     }
+    if (report.mcp) {
+        console.log(chalk.dim(`  mcp: ${report.mcp.serversSeen} server(s), ${report.mcp.toolCallsSignedWithProvenance} call(s) with provenance, ${report.mcp.toolCallsMissingProvenance} missing`));
+    }
     for (const r of report.reasons)
         console.log(chalk.red(`  · ${r}`));
     process.exit(report.ok ? 0 : 1);
@@ -519,6 +530,7 @@ async function runAuditCli(args) {
     f("ML-DSA-65 signature  ", "signature");
     f("sessionAlignment     ", "sessionAlignment");
     f("anchorDigest         ", "anchorDigest");
+    f("mcpProvenance        ", "mcpProvenance");
     console.log("");
     console.log(chalk.bold("  Identity"));
     console.log(`    publicKeyId:      ${header.publicKeyId}`);
@@ -608,6 +620,43 @@ function inspectOtsFile(file) {
     catch (e) {
         return { ok: false, summary: e?.message ?? String(e) };
     }
+}
+async function runMcpCli(args) {
+    const [sub] = args;
+    if (!sub || sub === "list") {
+        const config = loadConfig();
+        const trust = await resolveProjectTrust(config, { interactive: false });
+        const specs = loadMcpServerSpecs(config, { includeProject: trust.trustMcp });
+        if (specs.length === 0) {
+            console.log(chalk.dim("no MCP servers configured for this project"));
+            return;
+        }
+        console.log(chalk.dim(`connecting to ${specs.length} MCP server(s) to compute fingerprints…`));
+        await startMcpServers(specs);
+        const servers = getConnectedServers();
+        for (const s of servers) {
+            console.log("");
+            console.log(chalk.bold(s.name));
+            console.log(`  fingerprintId:  ${s.fingerprint.fingerprintId}`);
+            console.log(`  transport:      ${s.fingerprint.transport}`);
+            console.log(`  endpoint:       ${s.fingerprint.endpoint}`);
+            if (s.fingerprint.binarySha256) {
+                console.log(`  binarySha256:   ${s.fingerprint.binarySha256.slice(0, 16)}…`);
+            }
+            if (s.fingerprint.serverVersion) {
+                console.log(`  serverVersion:  ${s.fingerprint.serverVersion}`);
+            }
+            console.log(`  tools offered:  ${s.toolOfferings.length}`);
+            for (const t of s.toolOfferings) {
+                console.log(`    · ${t.toolName}  ${chalk.dim(`schema=${t.schemaSha256.slice(0, 12)}…`)}`);
+            }
+        }
+        await disconnectAll();
+        return;
+    }
+    console.error(chalk.red("usage: claw mcp [list]"));
+    console.error(chalk.dim("       (trust/revoke are planned for 0.6.1 — currently MCP consent inherits the project-level trust gate)"));
+    process.exit(2);
 }
 async function runIdentityCli(args) {
     const config = loadConfig();

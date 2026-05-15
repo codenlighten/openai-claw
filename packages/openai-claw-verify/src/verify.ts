@@ -100,11 +100,33 @@ export async function verifyAttestation(
     anchorSummary = { present: false };
   }
 
+  // MCP provenance check. Skipped entirely when the session does not use
+  // MCP-prefixed tools (which is most sessions today). When it does, we
+  // require — at minimum — that every mcp__-prefixed tool_call is preceded
+  // in the leaf sequence by an mcp_attach, an mcp_tool_offered, and a
+  // permission_decision. We do NOT yet enforce that those leaves bind to
+  // *this specific* tool call by content; that requires the session file
+  // to also record MCP-attach events and is tracked for a follow-up.
+  let mcpSummary: VerifyReport["mcp"] | undefined;
+  if (opts.sessionMessages) {
+    const prov = checkMcpProvenance(attestation.leaves, opts.sessionMessages);
+    if (prov.applicable) {
+      checks.mcpProvenance = prov.ok;
+      if (!prov.ok) reasons.push(...prov.reasons);
+      mcpSummary = {
+        serversSeen: prov.serversSeen,
+        toolCallsSignedWithProvenance: prov.signed,
+        toolCallsMissingProvenance: prov.missing,
+      };
+    }
+  }
+
   return {
     ok: reasons.length === 0,
     reasons,
     checks,
     anchor: anchorSummary,
+    mcp: mcpSummary,
   };
 }
 
@@ -159,4 +181,84 @@ function checkSessionAlignment(
   }
 
   return { ok: reasons.length === 0, reasons };
+}
+
+/**
+ * Detect MCP usage in the session and verify the structural provenance
+ * chain in the attestation. "Structural" here means kind-counting:
+ * mcp_attach, mcp_tool_offered, and permission_decision leaves must each
+ * exist with a `seq` lower than each MCP-prefixed tool_call leaf they
+ * cover. Strict per-call binding is deferred until session.json itself
+ * records MCP events (see whitepaper §9.8).
+ */
+function checkMcpProvenance(
+  leaves: Leaf[],
+  messages: SessionMessage[]
+): {
+  applicable: boolean;
+  ok: boolean;
+  reasons: string[];
+  serversSeen: number;
+  signed: number;
+  missing: number;
+} {
+  // Identify mcp__-prefixed tool calls via the session content, and
+  // compute their tool_call leaf payload hashes (same algorithm as
+  // checkSessionAlignment) so we can locate them in the leaf sequence.
+  const mcpToolCallHashes = new Set<string>();
+  const mcpServers = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== "assistant") continue;
+    for (const tc of m.tool_calls ?? []) {
+      const name = tc.function.name;
+      if (!name.startsWith("mcp__")) continue;
+      // Convention: "mcp__<server>__<tool>".
+      const server = name.split("__")[1];
+      if (server) mcpServers.add(server);
+      let parsedInput: unknown = undefined;
+      try {
+        parsedInput = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
+      } catch {
+        parsedInput = tc.function.arguments;
+      }
+      mcpToolCallHashes.add(hashPayload({ name, input: parsedInput, callId: tc.id }));
+    }
+  }
+  if (mcpServers.size === 0) {
+    return { applicable: false, ok: true, reasons: [], serversSeen: 0, signed: 0, missing: 0 };
+  }
+
+  // For each MCP-prefixed tool_call leaf, scan earlier leaves for the
+  // required provenance triple (attach + offer + consent).
+  let signed = 0;
+  let missing = 0;
+  const reasons: string[] = [];
+  for (let i = 0; i < leaves.length; i++) {
+    const l = leaves[i];
+    if (l.kind !== "tool_call") continue;
+    if (!mcpToolCallHashes.has(l.payloadHash)) continue;
+    const prior = leaves.slice(0, i);
+    const hasAttach = prior.some((p) => p.kind === "mcp_attach");
+    const hasOffer = prior.some((p) => p.kind === "mcp_tool_offered");
+    const hasConsent = prior.some((p) => p.kind === "permission_decision");
+    if (hasAttach && hasOffer && hasConsent) {
+      signed++;
+    } else {
+      missing++;
+      const lacking: string[] = [];
+      if (!hasAttach) lacking.push("mcp_attach");
+      if (!hasOffer) lacking.push("mcp_tool_offered");
+      if (!hasConsent) lacking.push("permission_decision");
+      reasons.push(`mcp tool_call at seq=${l.seq} lacks ${lacking.join(", ")} before it`);
+    }
+  }
+
+  return {
+    applicable: true,
+    ok: missing === 0,
+    reasons,
+    serversSeen: mcpServers.size,
+    signed,
+    missing,
+  };
 }

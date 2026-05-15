@@ -59,6 +59,49 @@ export class SessionAttestor {
         this.attestor?.onAgentEvent(evt);
     }
     /**
+     * Emit MCP-attach / tool-offer / per-server-consent leaves for every
+     * currently-connected server. Call once at session start, before the
+     * agent begins running, so any subsequent mcp__-prefixed tool_call
+     * leaves have the provenance triple in front of them.
+     *
+     * The `trustedByProject` flag carries the result of the existing
+     * project-level trust gate forward into a signed permission_decision
+     * leaf — so even before per-server consent UX lands in 0.6.1, the
+     * mcpProvenance check has something to find.
+     */
+    recordMcpServers(servers, trustedByProject) {
+        if (!this.attestor)
+            return;
+        for (const s of servers) {
+            this.attestor.record("mcp_attach", {
+                server: s.name,
+                transport: s.fingerprint.transport,
+                endpoint: s.fingerprint.endpoint,
+                binarySha256: s.fingerprint.binarySha256 ?? null,
+                args: s.fingerprint.args ?? null,
+                envNames: s.fingerprint.envNames ?? null,
+                serverVersion: s.fingerprint.serverVersion ?? null,
+                fingerprintId: s.fingerprint.fingerprintId,
+            });
+            for (const t of s.toolOfferings) {
+                this.attestor.record("mcp_tool_offered", {
+                    server: s.name,
+                    serverFingerprintId: s.fingerprint.fingerprintId,
+                    tool: t.toolName,
+                    schemaSha256: t.schemaSha256,
+                    descriptionSha256: t.descriptionSha256,
+                });
+            }
+            this.attestor.record("permission_decision", {
+                kind: "mcp",
+                server: s.name,
+                serverFingerprintId: s.fingerprint.fingerprintId,
+                consent: trustedByProject ? "yes" : "no",
+                scope: "project-trust", // upgrades to "per-server" in 0.6.1
+            });
+        }
+    }
+    /**
      * Write `<sessionId>.attest.json` next to `<sessionId>.json`. Returns the
      * file path on success, or null when no sidecar was written (because the
      * attestor isn't active or finalization failed).

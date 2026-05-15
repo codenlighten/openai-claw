@@ -183,6 +183,104 @@ describe("verifyAttestation end-to-end", () => {
     expect(report.reasons.join(" ")).toMatch(/anchor digest does not match/);
   });
 
+  it("mcpProvenance is skipped when the session uses no MCP tools", async () => {
+    const { attestation } = await makeSignedAttestation();
+    // makeSignedAttestation builds a one-leaf attestation: user_prompt("hi").
+    // Match the session messages exactly so sessionAlignment passes too.
+    const report = await verifyAttestation(attestation, {
+      sessionMessages: [{ role: "user", content: "hi" }],
+    });
+    expect(report.ok).toBe(true);
+    expect(report.checks.mcpProvenance).toBeUndefined();
+    expect(report.mcp).toBeUndefined();
+  });
+
+  it("mcpProvenance passes when attach/offer/consent leaves precede each mcp tool_call", async () => {
+    const suite = new MlDsa65Suite();
+    const kp = await suite.generateKeypair();
+    const callId = "c1";
+    const tcPayload = { name: "mcp__alpha__query", input: { q: "x" }, callId };
+    const leaves: Leaf[] = [
+      { v: 1, seq: 0, ts: "2026-01-01T00:00:00Z", kind: "user_prompt", payloadHash: hashPayload({ content: "do it" }) },
+      { v: 1, seq: 1, ts: "2026-01-01T00:00:01Z", kind: "mcp_attach", payloadHash: hashPayload({ server: "alpha", binarySha256: "a".repeat(64) }) },
+      { v: 1, seq: 2, ts: "2026-01-01T00:00:02Z", kind: "mcp_tool_offered", payloadHash: hashPayload({ tool: "query", schemaSha256: "b".repeat(64) }) },
+      { v: 1, seq: 3, ts: "2026-01-01T00:00:03Z", kind: "permission_decision", payloadHash: hashPayload({ server: "alpha", consent: "yes" }) },
+      { v: 1, seq: 4, ts: "2026-01-01T00:00:04Z", kind: "tool_call", payloadHash: hashPayload(tcPayload) },
+    ];
+    const root = merkleRoot(leaves.map(hashLeaf));
+    const header = {
+      v: 1 as const,
+      format: "openai-claw.attestation.v1" as const,
+      sessionId: "mcp-good",
+      startedAt: "2026-01-01T00:00:00Z",
+      endedAt: "2026-01-01T00:00:04Z",
+      leafCount: leaves.length,
+      merkleRoot: root,
+      suiteId: "ml-dsa-65",
+      publicKey: Buffer.from(kp.publicKey).toString("base64"),
+      publicKeyId: "test-key",
+    };
+    const sig = await suite.sign(kp.privateKey, Buffer.from(canonicalJSON(header), "utf8"));
+    const attestation: Attestation = { header, leaves, signature: Buffer.from(sig).toString("base64") };
+    const sessionMessages = [
+      { role: "user" as const, content: "do it" },
+      {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [{ id: callId, function: { name: "mcp__alpha__query", arguments: JSON.stringify({ q: "x" }) } }],
+      },
+    ];
+    const report = await verifyAttestation(attestation, { sessionMessages });
+    expect(report.ok).toBe(true);
+    expect(report.checks.mcpProvenance).toBe(true);
+    expect(report.mcp).toEqual({
+      serversSeen: 1,
+      toolCallsSignedWithProvenance: 1,
+      toolCallsMissingProvenance: 0,
+    });
+  });
+
+  it("mcpProvenance fails when attach/offer/consent leaves are missing", async () => {
+    const suite = new MlDsa65Suite();
+    const kp = await suite.generateKeypair();
+    const callId = "c2";
+    const tcPayload = { name: "mcp__beta__write", input: {}, callId };
+    // Missing mcp_attach + mcp_tool_offered, no permission_decision.
+    const leaves: Leaf[] = [
+      { v: 1, seq: 0, ts: "2026-01-01T00:00:00Z", kind: "user_prompt", payloadHash: hashPayload({ content: "do it" }) },
+      { v: 1, seq: 1, ts: "2026-01-01T00:00:01Z", kind: "tool_call", payloadHash: hashPayload(tcPayload) },
+    ];
+    const root = merkleRoot(leaves.map(hashLeaf));
+    const header = {
+      v: 1 as const,
+      format: "openai-claw.attestation.v1" as const,
+      sessionId: "mcp-bad",
+      startedAt: "2026-01-01T00:00:00Z",
+      endedAt: "2026-01-01T00:00:02Z",
+      leafCount: leaves.length,
+      merkleRoot: root,
+      suiteId: "ml-dsa-65",
+      publicKey: Buffer.from(kp.publicKey).toString("base64"),
+      publicKeyId: "test-key",
+    };
+    const sig = await suite.sign(kp.privateKey, Buffer.from(canonicalJSON(header), "utf8"));
+    const attestation: Attestation = { header, leaves, signature: Buffer.from(sig).toString("base64") };
+    const sessionMessages = [
+      { role: "user" as const, content: "do it" },
+      {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [{ id: callId, function: { name: "mcp__beta__write", arguments: "{}" } }],
+      },
+    ];
+    const report = await verifyAttestation(attestation, { sessionMessages });
+    expect(report.ok).toBe(false);
+    expect(report.checks.mcpProvenance).toBe(false);
+    expect(report.reasons.join(" ")).toMatch(/lacks mcp_attach, mcp_tool_offered, permission_decision/);
+    expect(report.mcp?.toolCallsMissingProvenance).toBe(1);
+    expect(report.mcp?.serversSeen).toBe(1);
+  });
+
   it("detects a tampered header by failed signature", async () => {
     const suite = new MlDsa65Suite();
     const kp = await suite.generateKeypair();

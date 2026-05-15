@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ok, err } from "../tools/types.js";
+import { computeFingerprint } from "./fingerprint.js";
 let connected = [];
 export function loadMcpServerSpecs(config, opts = {}) {
     const includeProject = opts.includeProject ?? true;
@@ -54,7 +56,29 @@ async function connectOne(spec) {
         });
     const client = new Client({ name: "openai-claw", version: "0.1.0" }, { capabilities: {} });
     await client.connect(transport);
+    // Fingerprint the server now that we've connected — the SDK's getServerVersion()
+    // gives us version info from the initialize handshake.
+    const serverVersion = (() => {
+        try {
+            return client.getServerVersion?.()?.version;
+        }
+        catch {
+            return undefined;
+        }
+    })();
+    const fingerprint = computeFingerprint({
+        name: spec.name,
+        config: spec.config,
+        serverInfo: { version: serverVersion },
+    });
     const list = await client.listTools();
+    const toolOfferings = list.tools.map((t) => ({
+        serverName: spec.name,
+        serverFingerprintId: fingerprint.fingerprintId,
+        toolName: t.name,
+        schemaSha256: sha256Canon(t.inputSchema ?? {}),
+        descriptionSha256: sha256Canon(t.description ?? ""),
+    }));
     const tools = list.tools.map((t) => wrapTool(spec.name, client, t));
     // Resources and prompts are optional; servers may not implement them.
     // -32601 = JSON-RPC "Method not found"; expected from servers that opt out.
@@ -85,7 +109,49 @@ async function connectOne(spec) {
             console.warn(`[claw] MCP '${spec.name}' listPrompts failed: ${e?.message ?? e}`);
         }
     }
-    return { name: spec.name, client, tools, resources, prompts };
+    return { name: spec.name, client, tools, resources, prompts, fingerprint, toolOfferings };
+}
+/**
+ * Inspect the currently-connected MCP servers. Used by the Attestor and CLI
+ * to emit attestation leaves and to drive `claw mcp list`. The returned
+ * objects expose fingerprint and tool-offering data captured at attach
+ * time; they do not mutate after attach.
+ */
+export function getConnectedServers() {
+    return connected.map((c) => ({
+        name: c.name,
+        fingerprint: c.fingerprint,
+        toolOfferings: c.toolOfferings,
+    }));
+}
+function sha256Canon(value) {
+    return createHash("sha256")
+        .update(canonicalJSON(value), "utf8")
+        .digest("hex");
+}
+// Minimal canonical-JSON suitable for hashing tool schemas/descriptions.
+// Mirrors the verify package's canonical form; deliberately not imported so
+// claw's MCP layer stays standalone if the verify dep is ever swapped.
+function canonicalJSON(v) {
+    if (v === null)
+        return "null";
+    if (typeof v === "boolean")
+        return v ? "true" : "false";
+    if (typeof v === "number") {
+        if (!Number.isFinite(v))
+            throw new Error(`canonicalJSON: non-finite ${v}`);
+        return JSON.stringify(v);
+    }
+    if (typeof v === "string")
+        return JSON.stringify(v);
+    if (Array.isArray(v))
+        return "[" + v.map(canonicalJSON).join(",") + "]";
+    if (typeof v === "object") {
+        const obj = v;
+        const keys = Object.keys(obj).filter((k) => obj[k] !== undefined).sort();
+        return "{" + keys.map((k) => JSON.stringify(k) + ":" + canonicalJSON(obj[k])).join(",") + "}";
+    }
+    throw new Error(`canonicalJSON: unsupported ${typeof v}`);
 }
 export function getMcpDirectory() {
     return {

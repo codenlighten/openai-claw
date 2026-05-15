@@ -15,7 +15,9 @@ export type LeafKind =
   | "tool_result"
   | "permission_decision"
   | "compaction"
-  | "error";
+  | "error"
+  | "mcp_attach"           // server fingerprint at first encounter (v1.1+)
+  | "mcp_tool_offered";    // tool schema/description offered to the model (v1.1+)
 
 export interface Leaf {
   v: 1;
@@ -108,6 +110,13 @@ export interface VerifyReport {
     sessionAlignment?: boolean;
     /** Anchor digest matches sha256(canonical-JSON(header)). Skipped when no anchor. */
     anchorDigest?: boolean;
+    /**
+     * Every mcp__-prefixed tool_call leaf has a preceding mcp_attach leaf
+     * referenced by serverRef, a matching mcp_tool_offered leaf, and a
+     * permission_decision leaf with consent: yes. Skipped when no
+     * mcp__-prefixed tool calls appear in the session.
+     */
+    mcpProvenance?: boolean;
   };
   /** Surfaced for downstream tools that want to display anchor status. */
   anchor?: {
@@ -115,5 +124,11 @@ export interface VerifyReport {
     type?: string;
     submittedAt?: string;
     acceptedBy?: string[];
+  };
+  /** MCP attribution summary (only populated when the session uses MCP). */
+  mcp?: {
+    serversSeen: number;
+    toolCallsSignedWithProvenance: number;
+    toolCallsMissingProvenance: number;
   };
 }
