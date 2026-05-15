@@ -1,7 +1,6 @@
 import { MlDsa65Suite } from "@smartledger/crypto";
-import { canonicalJSON, hashLeaf, hashPayload, } from "./leaf.js";
-import { merkleRoot } from "./merkle.js";
-import { publicView, ATTEST_SUITE_ID, } from "./identity.js";
+import { canonicalJSON, hashLeaf, hashPayload, merkleRoot, } from "@smartledger.technology/openai-claw-verify";
+import { publicView, ATTEST_SUITE_ID } from "./identity.js";
 export const ATTESTATION_FORMAT = "openai-claw.attestation.v1";
 /**
  * Collects leaf events for one session and finalizes them into a signed
@@ -12,6 +11,10 @@ export const ATTESTATION_FORMAT = "openai-claw.attestation.v1";
  * (user/assistant text boundaries, tool calls, tool results, permission
  * decisions, compaction events, errors). Streaming `text_delta` is ignored;
  * the final `text` event captures the assistant's reply.
+ *
+ * Primitives (canonical JSON, leaf hashing, Merkle root) are imported from
+ * `@smartledger.technology/openai-claw-verify` so claw and any third-party
+ * auditor compute byte-identical hashes from the same data.
  */
 export class Attestor {
     id;
@@ -22,7 +25,6 @@ export class Attestor {
     constructor(id) {
         this.id = id;
     }
-    /** Manually record a leaf — used for the user_prompt before the agent runs. */
     record(kind, payload) {
         const leaf = {
             v: 1,
@@ -33,7 +35,6 @@ export class Attestor {
         };
         this.leaves.push(leaf);
     }
-    /** Feed an AgentEvent. Returns true if this event produced a leaf. */
     onAgentEvent(evt) {
         switch (evt.type) {
             case "tool_call": {
@@ -45,8 +46,6 @@ export class Attestor {
             }
             case "tool_result": {
                 const d = evt.data;
-                // Pair with the original input so a verifier can recompute both sides
-                // from session.json without keeping a separate map.
                 const input = d.callId ? this.toolInputs.get(d.callId) : undefined;
                 this.record("tool_result", {
                     name: d.name,
@@ -67,14 +66,9 @@ export class Attestor {
                 this.record("error", { message: String(evt.data) });
                 return true;
             default:
-                // text_delta, tool_progress, usage, done, thinking — not load-bearing
                 return false;
         }
     }
-    /**
-     * Build the signed attestation. Idempotent given the same leaves; safe to
-     * call once at session save.
-     */
     async finalize(sessionId) {
         const leafHashes = this.leaves.map(hashLeaf);
         const root = merkleRoot(leafHashes);
@@ -102,7 +96,6 @@ export class Attestor {
         return this.leaves.length;
     }
 }
-/** Pure helper so callers can sanity-check the suite mid-flight if they want. */
 export function expectedSuiteId() {
     return ATTEST_SUITE_ID;
 }

@@ -2,9 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { createIdentity, loadIdentity } from "../src/attest/identity.js";
-import { Attestor } from "../src/attest/attestor.js";
-import { verifyAttestation } from "../src/attest/verify.js";
+import { createIdentity, loadIdentity, Attestor, verifyAttestation } from "../src/attest/index.js";
 import type { ClawConfig } from "../src/config.js";
 
 let home: string;
