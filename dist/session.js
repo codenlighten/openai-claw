@@ -85,7 +85,7 @@ export function listSessions(config) {
     const dir = sessionsDir(config);
     const files = fs
         .readdirSync(dir)
-        .filter((f) => f.endsWith(".json") && f !== "last.json")
+        .filter((f) => f.endsWith(".json") && !f.endsWith(".attest.json") && f !== "last.json")
         .map((f) => path.join(dir, f));
     const summaries = [];
     for (const file of files) {

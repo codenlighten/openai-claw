@@ -5,7 +5,7 @@ import { HookRunner } from "../hooks/index.js";
 import { prepareUserMessage } from "../input.js";
 import { saveSession } from "../session.js";
 import { notify } from "../notifications/index.js";
-export async function startRepl({ agent, config, permissions }) {
+export async function startRepl({ agent, config, permissions, sessionAttestor }) {
     const completer = (line) => {
         if (!line.startsWith("/"))
             return [[], line];
@@ -116,9 +116,14 @@ export async function startRepl({ agent, config, permissions }) {
         if (prepared.attachments.length) {
             console.log(chalk.dim(`  attached: ${prepared.attachments.join(", ")}`));
         }
+        sessionAttestor?.recordUserPrompt(input);
         agent.pushUser(prepared.content);
         aborter = new AbortController();
-        const handler = makeEventHandler(hooks);
+        const baseHandler = makeEventHandler(hooks);
+        const handler = (evt) => {
+            sessionAttestor?.onAgentEvent(evt);
+            baseHandler(evt);
+        };
         const turnStart = Date.now();
         try {
             await agent.run(handler, aborter.signal);
@@ -128,11 +133,19 @@ export async function startRepl({ agent, config, permissions }) {
         }
         finally {
             aborter = null;
+            let savedId;
             try {
                 const { id } = saveSession(config, agent.conversation, sessionRef.current);
                 sessionRef.current = id;
+                savedId = id;
             }
             catch { }
+            if (savedId && sessionAttestor?.enabled) {
+                const sidecar = await sessionAttestor.writeSidecar(savedId);
+                if (sidecar) {
+                    console.log(chalk.dim(`[attest] ${sessionAttestor.leafCount} leaf(s) signed`));
+                }
+            }
             const durationSec = (Date.now() - turnStart) / 1000;
             notify(config, {
                 kind: "Stop",

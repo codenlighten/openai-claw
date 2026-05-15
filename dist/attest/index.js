@@ -12,4 +12,5 @@
 export { canonicalJSON, hashPayload, hashLeaf, sha256Hex, merkleRoot, merkleProof, verifyMerkleProof, verifyAttestation, } from "@smartledger.technology/openai-claw-verify";
 export { createIdentity, loadIdentity, identityExists, identityFile, publicView, ATTEST_SUITE_ID, } from "./identity.js";
 export { Attestor, ATTESTATION_FORMAT } from "./attestor.js";
+export { SessionAttestor } from "./runtime.js";
 //# sourceMappingURL=index.js.map

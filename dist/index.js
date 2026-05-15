@@ -143,18 +143,15 @@ async function main() {
     }
     if (promptArg && promptArg.length > 0) {
         let sawError = false;
-        // If an attestor identity is configured, start collecting leaves so the
-        // session save below can write a signed sidecar. Untrusted-project runs
-        // and runs without `claw attest init` are unaffected.
-        const { loadIdentity, Attestor } = await import("./attest/index.js");
-        const attestorId = loadIdentity(config);
-        const attestor = attestorId ? new Attestor(attestorId) : null;
-        if (attestor)
-            attestor.record("user_prompt", { content: promptArg });
+        const { SessionAttestor } = await import("./attest/index.js");
+        const attestor = new SessionAttestor(config, {
+            resumed: !!argv.continue,
+            quietWhenNoIdentity: true,
+        });
+        attestor.recordUserPrompt(promptArg);
         agent.pushUser(prepareUserMessage(promptArg, config).content);
         await agent.run((evt) => {
-            if (attestor)
-                attestor.onAgentEvent(evt);
+            attestor.onAgentEvent(evt);
             if (evt.type === "text_delta")
                 process.stdout.write(evt.data);
             if (evt.type === "tool_call") {
@@ -178,15 +175,10 @@ async function main() {
             savedId = r.id;
         }
         catch { }
-        if (attestor && savedId) {
-            try {
-                const attestation = await attestor.finalize(savedId);
-                const sidecar = path.join(config.projectDir, "sessions", `${savedId}.attest.json`);
-                fs.writeFileSync(sidecar, JSON.stringify(attestation, null, 2));
-                console.error(chalk.dim(`[attest] signed ${attestation.header.leafCount} leaf(s), root=${attestation.header.merkleRoot.slice(0, 16)}…, key=${attestation.header.publicKeyId}`));
-            }
-            catch (e) {
-                console.error(chalk.yellow(`[attest] could not write attestation: ${e?.message ?? e}`));
+        if (savedId && attestor.enabled) {
+            const sidecar = await attestor.writeSidecar(savedId);
+            if (sidecar) {
+                console.error(chalk.dim(`[attest] signed ${attestor.leafCount} leaf(s) → ${path.basename(sidecar)}`));
             }
         }
         await disconnectAll();
@@ -194,11 +186,16 @@ async function main() {
             process.exit(1);
         return;
     }
+    const { SessionAttestor } = await import("./attest/index.js");
+    const sessionAttestor = new SessionAttestor(config, {
+        resumed: !!argv.continue,
+        quietWhenNoIdentity: true,
+    });
     if (argv.tui) {
-        await startTui({ agent, config, permissions });
+        await startTui({ agent, config, permissions, sessionAttestor });
     }
     else {
-        await startRepl({ agent, config, permissions });
+        await startRepl({ agent, config, permissions, sessionAttestor });
     }
     await disconnectAll();
 }

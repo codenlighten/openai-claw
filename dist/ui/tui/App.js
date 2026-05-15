@@ -11,7 +11,7 @@ import { StatusBar } from "./StatusBar.js";
 import { SlashSuggest, firstMatch } from "./SlashSuggest.js";
 let idCounter = 0;
 const nextId = () => `id-${++idCounter}`;
-export function App({ agent, config, permissions, hooks }) {
+export function App({ agent, config, permissions, hooks, sessionAttestor }) {
     const { exit } = useApp();
     const [history, setHistory] = useState([
         { kind: "system", id: nextId(), text: `workdir: ${config.workdir}` },
@@ -106,12 +106,14 @@ export function App({ agent, config, permissions, hooks }) {
             ? `${text}\n  attached: ${prepared.attachments.join(", ")}`
             : text;
         push({ kind: "user", id: nextId(), text: userLine });
+        sessionAttestor?.recordUserPrompt(text);
         agent.pushUser(prepared.content);
         setBusy(true);
         aborterRef.current = new AbortController();
         let streamBuffer = "";
         const streamId = nextId();
         const handler = (evt) => {
+            sessionAttestor?.onAgentEvent(evt);
             switch (evt.type) {
                 case "text_delta":
                     streamBuffer += evt.data;
@@ -206,11 +208,19 @@ export function App({ agent, config, permissions, hooks }) {
             setStreamingItem(null);
             aborterRef.current = null;
             setBusy(false);
+            let savedId;
             try {
                 const { id } = saveSession(config, agent.conversation, sessionRef.current.current);
                 sessionRef.current.current = id;
+                savedId = id;
             }
             catch { }
+            if (savedId && sessionAttestor?.enabled) {
+                const sidecar = await sessionAttestor.writeSidecar(savedId);
+                if (sidecar) {
+                    push({ kind: "system", id: nextId(), text: `[attest] ${sessionAttestor.leafCount} leaf(s) signed` });
+                }
+            }
             const durationSec = (Date.now() - turnStart) / 1000;
             notify(config, {
                 kind: "Stop",

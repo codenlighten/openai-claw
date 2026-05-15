@@ -91,4 +91,19 @@ describe("session.ts multi-session", () => {
     expect(r.id).toBe("my-session-1");
     expect(loadSession(cfg(), "my-session-1")?.messages[0].content).toBe("hi");
   });
+
+  it("listSessions skips attestation sidecars (*.attest.json)", () => {
+    const r = saveSession(cfg(), [msg("real")], "sess1");
+    // Drop an attestation sidecar next to the session file — it ends in
+    // .json but should NOT be returned by listSessions and should not break
+    // --continue when it picks the most-recent session.
+    fs.writeFileSync(path.join(tmp, "sessions", "sess1.attest.json"), '{"header":{},"leaves":[]}');
+    const list = listSessions(cfg());
+    expect(list.map((s) => s.id)).toEqual(["sess1"]);
+    // loadSession() with no id must also skip the sidecar.
+    const loaded = loadSession(cfg());
+    expect(loaded?.id).toBe("sess1");
+    expect(loaded?.messages[0].content).toBe("real");
+    void r;
+  });
 });

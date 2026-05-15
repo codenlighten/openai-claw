@@ -31,7 +31,7 @@ It mirrors most of Claude Code's surface area: tool-calling agent loop, REPL, sl
 - **Slash commands** — `/help`, `/clear`, `/model`, `/mode`, `/plan`, `/memory`, `/remember`, `/cost`, `/config`, `/init`, `/exit`, `/vim`, `/sessions`, `/fork`, `/index`, `/review`, `/hooks`, …
 - **Shell escape** — prefix any input with `!` to run it directly in the shell
 - **One-shot mode** — `claw -p "your prompt"` runs once and prints the answer
-- **Attested execution (experimental)** — opt in with `claw attest init` to generate a post-quantum (NIST FIPS-204 ML-DSA-65) keypair. Every one-shot run then writes a signed `<id>.attest.json` sidecar containing a Merkle root over the session's tool calls, results, and assistant replies. `claw verify <id>` checks the signature, recomputes the root, and cross-references it against the session file. Powered by `@smartledger/crypto`.
+- **Attested execution (experimental)** — opt in with `claw attest init` to generate a post-quantum (NIST FIPS-204 ML-DSA-65) keypair. Every run — one-shot (`-p`), REPL, and TUI — then writes a signed `<id>.attest.json` sidecar containing a Merkle root over the session's user prompts, assistant replies, tool calls, tool results, permission decisions, compaction events, and errors. `claw verify <id>` checks the signature, recomputes the root, and cross-references it against the session file. Powered by `@smartledger/crypto`; auditors can install the standalone `@smartledger.technology/openai-claw-verify` package (~11 kB) to verify sidecars without pulling claw itself. Resumed sessions (`--continue`) currently skip attestation and preserve the existing sidecar.
 
 ---
 

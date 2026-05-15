@@ -4,6 +4,7 @@ import TextInput from "ink-text-input";
 import type { Agent, AgentEvent } from "../../agent.js";
 import type { ClawConfig } from "../../config.js";
 import type { PermissionManager } from "../../permissions/index.js";
+import type { SessionAttestor } from "../../attest/index.js";
 import { findCommand } from "../../commands/index.js";
 import { HookRunner } from "../../hooks/index.js";
 import { prepareUserMessage } from "../../input.js";
@@ -20,12 +21,13 @@ export interface AppProps {
   config: ClawConfig;
   permissions: PermissionManager;
   hooks: HookRunner;
+  sessionAttestor?: SessionAttestor;
 }
 
 let idCounter = 0;
 const nextId = () => `id-${++idCounter}`;
 
-export function App({ agent, config, permissions, hooks }: AppProps) {
+export function App({ agent, config, permissions, hooks, sessionAttestor }: AppProps) {
   const { exit } = useApp();
   const [history, setHistory] = useState<ChatItem[]>([
     { kind: "system", id: nextId(), text: `workdir: ${config.workdir}` },
@@ -126,6 +128,7 @@ export function App({ agent, config, permissions, hooks }: AppProps) {
       ? `${text}\n  attached: ${prepared.attachments.join(", ")}`
       : text;
     push({ kind: "user", id: nextId(), text: userLine });
+    sessionAttestor?.recordUserPrompt(text);
     agent.pushUser(prepared.content);
 
     setBusy(true);
@@ -134,6 +137,7 @@ export function App({ agent, config, permissions, hooks }: AppProps) {
     const streamId = nextId();
 
     const handler = (evt: AgentEvent) => {
+      sessionAttestor?.onAgentEvent(evt);
       switch (evt.type) {
         case "text_delta":
           streamBuffer += evt.data as string;
@@ -224,10 +228,18 @@ export function App({ agent, config, permissions, hooks }: AppProps) {
       setStreamingItem(null);
       aborterRef.current = null;
       setBusy(false);
+      let savedId: string | undefined;
       try {
         const { id } = saveSession(config, agent.conversation, sessionRef.current.current);
         sessionRef.current.current = id;
+        savedId = id;
       } catch {}
+      if (savedId && sessionAttestor?.enabled) {
+        const sidecar = await sessionAttestor.writeSidecar(savedId);
+        if (sidecar) {
+          push({ kind: "system", id: nextId(), text: `[attest] ${sessionAttestor.leafCount} leaf(s) signed` });
+        }
+      }
       const durationSec = (Date.now() - turnStart) / 1000;
       notify(config, {
         kind: "Stop",

@@ -43,3 +43,5 @@ export {
 } from "./identity.js";
 
 export { Attestor, ATTESTATION_FORMAT } from "./attestor.js";
+
+export { SessionAttestor, type SessionAttestorOptions } from "./runtime.js";
