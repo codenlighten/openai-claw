@@ -5,9 +5,14 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ok, err } from "../tools/types.js";
 let connected = [];
-export function loadMcpServerSpecs(config) {
+export function loadMcpServerSpecs(config, opts = {}) {
+    const includeProject = opts.includeProject ?? true;
     const user = readJson(path.join(config.homeDir, "settings.json"));
-    const proj = readJson(path.join(config.workdir, ".claw", "settings.json"));
+    const proj = includeProject ? readJson(path.join(config.workdir, ".claw", "settings.json")) : {};
+    const projNames = Object.keys(proj.mcpServers ?? {});
+    if (!includeProject && projNames.length > 0) {
+        console.warn(`[claw] skipping ${projNames.length} project-level MCP server(s) (untrusted project): ${projNames.join(", ")}`);
+    }
     const merged = {
         ...(user.mcpServers ?? {}),
         ...(proj.mcpServers ?? {}),
@@ -52,6 +57,7 @@ async function connectOne(spec) {
     const list = await client.listTools();
     const tools = list.tools.map((t) => wrapTool(spec.name, client, t));
     // Resources and prompts are optional; servers may not implement them.
+    // -32601 = JSON-RPC "Method not found"; expected from servers that opt out.
     let resources = [];
     let prompts = [];
     try {
@@ -62,7 +68,11 @@ async function connectOne(spec) {
             description: x.description,
         }));
     }
-    catch { }
+    catch (e) {
+        if (e?.code !== -32601) {
+            console.warn(`[claw] MCP '${spec.name}' listResources failed: ${e?.message ?? e}`);
+        }
+    }
     try {
         const p = await client.listPrompts();
         prompts = (p.prompts ?? []).map((x) => ({
@@ -70,7 +80,11 @@ async function connectOne(spec) {
             description: x.description,
         }));
     }
-    catch { }
+    catch (e) {
+        if (e?.code !== -32601) {
+            console.warn(`[claw] MCP '${spec.name}' listPrompts failed: ${e?.message ?? e}`);
+        }
+    }
     return { name: spec.name, client, tools, resources, prompts };
 }
 export function getMcpDirectory() {

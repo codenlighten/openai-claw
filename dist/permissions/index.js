@@ -40,11 +40,14 @@ export class PermissionManager {
         if (answer === "yes")
             return { allow: true };
         if (answer === "always") {
-            this.sessionAllows.push({ pattern: toolName });
+            // Scope "always" to the described key (e.g. Bash(npm:*)), not the bare
+            // tool name — otherwise approving one Bash command would whitelist
+            // every future Bash invocation in the session.
+            this.sessionAllows.push({ pattern: key });
             return { allow: true };
         }
         if (answer === "save") {
-            this.config.allowedTools.push(toolName);
+            this.config.allowedTools.push(key);
             saveUserSetting(this.config, "allowedTools", this.config.allowedTools);
             return { allow: true };
         }

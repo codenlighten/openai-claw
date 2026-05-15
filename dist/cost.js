@@ -35,14 +35,24 @@ export function computeCostUSD(model, promptTokens, completionTokens, cachedToke
 function costLogFile(config) {
     return path.join(config.projectDir, "cost.log");
 }
+let costLogWarned = false;
 export function appendCostLog(config, entry) {
     try {
         const full = { ts: new Date().toISOString(), ...entry };
         fs.appendFileSync(costLogFile(config), JSON.stringify(full) + "\n");
     }
-    catch {
-        // logging is never allowed to crash the agent
+    catch (e) {
+        // logging is never allowed to crash the agent, but a one-shot warning
+        // makes silent breakage of /cost diagnosable.
+        if (!costLogWarned) {
+            costLogWarned = true;
+            console.error(`[claw] cost log write failed (further errors silenced): ${e?.message ?? e}`);
+        }
     }
+}
+/** Test-only: reset the once-per-process warning latch. */
+export function _resetCostLogWarned() {
+    costLogWarned = false;
 }
 export function readCostLog(config) {
     try {

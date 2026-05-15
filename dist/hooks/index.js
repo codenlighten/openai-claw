@@ -3,8 +3,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 export class HookRunner {
     hooks = [];
-    constructor(config) {
-        this.hooks = loadHooks(config);
+    constructor(config, opts = {}) {
+        this.hooks = loadHooks(config, opts.includeProject ?? true);
     }
     async run(event, payload) {
         const matches = this.hooks.filter((h) => {
@@ -37,9 +37,11 @@ export class HookRunner {
         return outcomes;
     }
 }
-function loadHooks(config) {
+function loadHooks(config, includeProject) {
     const userSettings = readSettings(path.join(config.homeDir, "settings.json"));
-    const projectSettings = readSettings(path.join(config.workdir, ".claw", "settings.json"));
+    const projectSettings = includeProject
+        ? readSettings(path.join(config.workdir, ".claw", "settings.json"))
+        : {};
     const hooks = [];
     for (const s of [userSettings, projectSettings]) {
         if (!s.hooks)
@@ -50,6 +52,15 @@ function loadHooks(config) {
             for (const d of defs) {
                 if (!d?.command)
                     continue;
+                if (d.matcher) {
+                    try {
+                        new RegExp(d.matcher);
+                    }
+                    catch (e) {
+                        console.warn(`[claw] ignoring hook with invalid matcher regex ${JSON.stringify(d.matcher)}: ${e?.message ?? e}`);
+                        continue;
+                    }
+                }
                 hooks.push({ event: event, matcher: d.matcher, command: d.command });
             }
         }

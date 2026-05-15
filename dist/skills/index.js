@@ -28,7 +28,9 @@ export function listSkills(config) {
                     file: skillFile,
                 });
             }
-            catch { }
+            catch (e) {
+                console.warn(`[claw] ignoring malformed skill ${skillFile}: ${e?.message ?? e}`);
+            }
         }
     }
     return skills;

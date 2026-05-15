@@ -64,8 +64,55 @@ function readJsonSafe(p) {
 }
 export function saveUserSetting(config, key, value) {
     const p = path.join(config.homeDir, "settings.json");
-    const current = readJsonSafe(p);
-    current[key] = value;
-    fs.writeFileSync(p, JSON.stringify(current, null, 2));
+    withSettingsLock(p, () => {
+        const current = readJsonSafe(p);
+        current[key] = value;
+        fs.writeFileSync(p, JSON.stringify(current, null, 2));
+    });
+}
+// Two concurrent claw sessions both answering "save" can otherwise lose
+// one of the writes (classic read-modify-write race). We serialize via
+// an exclusive sibling lockfile with a short retry loop — no new dep.
+function withSettingsLock(targetPath, fn) {
+    const lockPath = targetPath + ".lock";
+    const maxAttempts = 20;
+    let fd = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+            fd = fs.openSync(lockPath, "wx");
+            break;
+        }
+        catch (e) {
+            if (e?.code !== "EEXIST")
+                throw e;
+            // Sleep ~50ms synchronously without spinning.
+            const until = Date.now() + 50;
+            while (Date.now() < until) {
+                // no-op busy-wait; acceptable for short lock waits in a CLI
+            }
+        }
+    }
+    if (fd === null) {
+        // Last-resort: give up the lock and proceed. Better to risk a race
+        // than to permanently block on a stale .lock.
+        try {
+            fs.rmSync(lockPath, { force: true });
+        }
+        catch { }
+        return fn();
+    }
+    try {
+        return fn();
+    }
+    finally {
+        try {
+            fs.closeSync(fd);
+        }
+        catch { }
+        try {
+            fs.rmSync(lockPath, { force: true });
+        }
+        catch { }
+    }
 }
 //# sourceMappingURL=config.js.map

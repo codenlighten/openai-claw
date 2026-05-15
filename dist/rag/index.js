@@ -110,6 +110,9 @@ export async function buildIndex(config, onProgress) {
             model: EMBED_MODEL,
             input: slice.map((p) => p.text),
         });
+        if (res.data.length !== slice.length) {
+            throw new Error(`embedding count mismatch: got ${res.data.length}, expected ${slice.length}`);
+        }
         for (let j = 0; j < slice.length; j++) {
             chunks.push({
                 file: slice[j].file,

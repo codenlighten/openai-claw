@@ -1,6 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
+// Memory names become filenames inside memoryDir, so reject anything that
+// could escape the directory (path separators, parent refs, leading dot).
+const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+function safeMemoryName(name) {
+    if (!SAFE_NAME.test(name) || name.includes("..")) {
+        throw new Error(`invalid memory name: ${JSON.stringify(name)}`);
+    }
+    return name;
+}
 export function listMemories(config) {
     const dir = config.memoryDir;
     if (!fs.existsSync(dir))
@@ -20,13 +29,14 @@ export function listMemories(config) {
                 file: full,
             });
         }
-        catch {
-            // skip malformed
+        catch (e) {
+            console.warn(`[claw] ignoring malformed memory ${full}: ${e?.message ?? e}`);
         }
     }
     return entries;
 }
 export function writeMemory(config, entry) {
+    safeMemoryName(entry.name);
     const file = path.join(config.memoryDir, `${entry.name}.md`);
     const frontmatter = matter.stringify(entry.body, {
         name: entry.name,
@@ -38,6 +48,7 @@ export function writeMemory(config, entry) {
     return file;
 }
 export function deleteMemory(config, name) {
+    safeMemoryName(name);
     const file = path.join(config.memoryDir, `${name}.md`);
     if (!fs.existsSync(file))
         return false;

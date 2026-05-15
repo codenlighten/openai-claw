@@ -6,6 +6,12 @@ function sessionsDir(config) {
         fs.mkdirSync(dir, { recursive: true });
     return dir;
 }
+// Session ids become filenames inside sessionsDir; reject anything that
+// could escape it. newSessionId() output (ISO timestamp + hex) matches.
+const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+function isSafeSessionId(id) {
+    return SAFE_SESSION_ID.test(id) && !id.includes("..");
+}
 function newSessionId() {
     // ISO-ish timestamp safe for filenames + 4 random hex chars to disambiguate.
     const now = new Date().toISOString().replace(/[:.]/g, "-");
@@ -53,6 +59,8 @@ export function saveSession(config, messages, sessionId) {
 export function loadSession(config, sessionId) {
     const dir = sessionsDir(config);
     if (sessionId) {
+        if (!isSafeSessionId(sessionId))
+            return null;
         const file = path.join(dir, `${sessionId}.json`);
         if (!fs.existsSync(file)) {
             // Also accept legacy "last.json" by exact name.
