@@ -11,6 +11,16 @@ export interface MemoryEntry {
   file: string;
 }
 
+// Memory names become filenames inside memoryDir, so reject anything that
+// could escape the directory (path separators, parent refs, leading dot).
+const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+function safeMemoryName(name: string): string {
+  if (!SAFE_NAME.test(name) || name.includes("..")) {
+    throw new Error(`invalid memory name: ${JSON.stringify(name)}`);
+  }
+  return name;
+}
+
 export function listMemories(config: ClawConfig): MemoryEntry[] {
   const dir = config.memoryDir;
   if (!fs.existsSync(dir)) return [];
@@ -39,6 +49,7 @@ export function writeMemory(
   config: ClawConfig,
   entry: { name: string; description: string; type: MemoryEntry["type"]; body: string }
 ): string {
+  safeMemoryName(entry.name);
   const file = path.join(config.memoryDir, `${entry.name}.md`);
   const frontmatter = matter.stringify(entry.body, {
     name: entry.name,
@@ -51,6 +62,7 @@ export function writeMemory(
 }
 
 export function deleteMemory(config: ClawConfig, name: string): boolean {
+  safeMemoryName(name);
   const file = path.join(config.memoryDir, `${name}.md`);
   if (!fs.existsSync(file)) return false;
   fs.unlinkSync(file);

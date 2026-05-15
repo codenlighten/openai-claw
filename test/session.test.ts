@@ -78,4 +78,17 @@ describe("session.ts multi-session", () => {
     expect(fork.id).not.toBe(orig.id);
     expect(listSessions(cfg())).toHaveLength(2);
   });
+
+  it("rejects unsafe session ids that would escape sessionsDir", () => {
+    saveSession(cfg(), [msg("real")]);
+    for (const id of ["../../etc/passwd", "/etc/passwd", "..", "foo/bar", ".hidden"]) {
+      expect(loadSession(cfg(), id)).toBeNull();
+    }
+  });
+
+  it("round-trips a safe explicit id", () => {
+    const r = saveSession(cfg(), [msg("hi")], "my-session-1");
+    expect(r.id).toBe("my-session-1");
+    expect(loadSession(cfg(), "my-session-1")?.messages[0].content).toBe("hi");
+  });
 });

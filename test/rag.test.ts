@@ -5,11 +5,17 @@ import os from "node:os";
 
 // Mock OpenAI so we never reach the network — deterministic toy embeddings
 // keyed off the chunk text length + a per-call counter.
+const { mockState } = vi.hoisted(() => ({
+  mockState: { shortenBy: 0 },
+}));
 vi.mock("openai", () => ({
   default: class {
     embeddings = {
       create: async ({ input }: { input: string[] }) => {
-        const data = (input as string[]).map((text) => {
+        const inputs = mockState.shortenBy > 0
+          ? (input as string[]).slice(0, Math.max(0, input.length - mockState.shortenBy))
+          : (input as string[]);
+        const data = inputs.map((text) => {
           // Content-only toy embedding: one dimension per probe keyword. Cosine
           // ranking then mirrors lexical overlap, which is enough to assert the
           // pipeline routes the query to the most-relevant chunk.
@@ -85,5 +91,16 @@ describe("RAG index", () => {
 
   it("semanticSearch errors when no index exists", async () => {
     await expect(semanticSearch(cfg(), "x", 5)).rejects.toThrow(/No semantic index/);
+  });
+
+  it("throws on embedding count mismatch instead of corrupting the index", async () => {
+    fs.writeFileSync(path.join(tmp, "a.ts"), "alpha");
+    fs.writeFileSync(path.join(tmp, "b.ts"), "beta");
+    mockState.shortenBy = 1;
+    try {
+      await expect(buildIndex(cfg())).rejects.toThrow(/embedding count mismatch/);
+    } finally {
+      mockState.shortenBy = 0;
+    }
   });
 });

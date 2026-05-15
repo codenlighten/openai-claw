@@ -82,16 +82,70 @@ export async function runSubagent(
   });
 
   if (worktreePath) {
-    const diff = collectWorktreeDiff(worktreePath);
-    if (diff.trim() === "") {
+    const rawDiff = collectWorktreeDiff(worktreePath);
+    if (rawDiff.trim() === "") {
       // No changes — clean up immediately.
       removeWorktree(config.workdir, worktreePath, branchName);
       result = `${result}\n\n[worktree had no diff — auto-cleaned]`;
     } else {
-      result = `${result}\n\n[worktree retained: ${worktreePath}]\n[branch: ${branchName}]\n\n--- BEGIN DIFF ---\n${diff.slice(0, 50_000)}\n--- END DIFF ---`;
+      const { diff: filtered, redacted } = redactSensitiveHunks(rawDiff);
+      const { text: shown, dropped } = truncateDiff(filtered, 50_000);
+      const banner = `[worktree retained: ${worktreePath}]\n[branch: ${branchName}]`;
+      const redactNote = redacted.length
+        ? `\n[diff: redacted ${redacted.length} hunk(s) touching sensitive paths: ${redacted.join(", ")}]`
+        : "";
+      const truncNote = dropped > 0
+        ? `\n[diff truncated: ${dropped} chars omitted — pull the worktree to see the rest]`
+        : "";
+      result = `${result}\n\n${banner}${redactNote}\n\n--- BEGIN DIFF ---\n${shown}${truncNote}\n--- END DIFF ---`;
     }
   }
   return result || "(subagent returned no output)";
+}
+
+// File patterns that should never round-trip through the parent agent's
+// conversation (and from there, potentially into model providers/logs).
+const SENSITIVE_PATTERNS: RegExp[] = [
+  /(^|\/)\.env(\..+)?$/,
+  /\.pem$/,
+  /\.key$/,
+  /\.p12$/,
+  /(^|\/)id_(rsa|ed25519|ecdsa|dsa)(\..+)?$/,
+  /(^|\/)credentials\.json$/,
+  /(^|\/)secrets\.json$/,
+  /\.sqlite$/,
+];
+
+function isSensitivePath(p: string): boolean {
+  return SENSITIVE_PATTERNS.some((rx) => rx.test(p));
+}
+
+export function redactSensitiveHunks(diff: string): { diff: string; redacted: string[] } {
+  if (!diff) return { diff, redacted: [] };
+  // Split on the start of each "diff --git" block, keeping the prefix (if any).
+  const parts = diff.split(/(?=^diff --git )/m);
+  const kept: string[] = [];
+  const redacted: string[] = [];
+  for (const block of parts) {
+    if (!block.startsWith("diff --git ")) {
+      kept.push(block);
+      continue;
+    }
+    // "diff --git a/<path> b/<path>" — pull both sides.
+    const m = block.match(/^diff --git a\/(\S+) b\/(\S+)/);
+    const paths = m ? [m[1], m[2]] : [];
+    if (paths.some(isSensitivePath)) {
+      redacted.push(paths[1] ?? paths[0] ?? "<unknown>");
+      continue;
+    }
+    kept.push(block);
+  }
+  return { diff: kept.join(""), redacted };
+}
+
+function truncateDiff(diff: string, cap: number): { text: string; dropped: number } {
+  if (diff.length <= cap) return { text: diff, dropped: 0 };
+  return { text: diff.slice(0, cap), dropped: diff.length - cap };
 }
 
 function createWorktree(

@@ -68,4 +68,19 @@ describe("memory", () => {
   it("delete returns false for missing memory", () => {
     expect(deleteMemory(cfg(), "nope")).toBe(false);
   });
+
+  it("rejects names that would escape memoryDir", () => {
+    const bad = ["../escape", "foo/bar", ".hidden", "", "..", "a/../b"];
+    for (const name of bad) {
+      expect(() =>
+        writeMemory(cfg(), { name, description: "x", type: "user", body: "b" })
+      ).toThrow(/invalid memory name/);
+      expect(() => deleteMemory(cfg(), name)).toThrow(/invalid memory name/);
+    }
+  });
+
+  it("accepts well-formed names", () => {
+    writeMemory(cfg(), { name: "foo_bar-1", description: "d", type: "user", body: "b" });
+    expect(listMemories(cfg()).map((e) => e.name)).toEqual(["foo_bar-1"]);
+  });
 });

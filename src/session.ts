@@ -26,6 +26,13 @@ function sessionsDir(config: ClawConfig): string {
   return dir;
 }
 
+// Session ids become filenames inside sessionsDir; reject anything that
+// could escape it. newSessionId() output (ISO timestamp + hex) matches.
+const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+function isSafeSessionId(id: string): boolean {
+  return SAFE_SESSION_ID.test(id) && !id.includes("..");
+}
+
 function newSessionId(): string {
   // ISO-ish timestamp safe for filenames + 4 random hex chars to disambiguate.
   const now = new Date().toISOString().replace(/[:.]/g, "-");
@@ -79,6 +86,7 @@ export function saveSession(
 export function loadSession(config: ClawConfig, sessionId?: string): SessionFile | null {
   const dir = sessionsDir(config);
   if (sessionId) {
+    if (!isSafeSessionId(sessionId)) return null;
     const file = path.join(dir, `${sessionId}.json`);
     if (!fs.existsSync(file)) {
       // Also accept legacy "last.json" by exact name.
