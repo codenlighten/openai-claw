@@ -29,8 +29,8 @@ interface HookOutcome {
 
 export class HookRunner {
   private hooks: HookDefinition[] = [];
-  constructor(config: ClawConfig) {
-    this.hooks = loadHooks(config);
+  constructor(config: ClawConfig, opts: { includeProject?: boolean } = {}) {
+    this.hooks = loadHooks(config, opts.includeProject ?? true);
   }
 
   async run(event: HookEvent, payload: Record<string, unknown>): Promise<HookOutcome[]> {
@@ -63,9 +63,11 @@ export class HookRunner {
   }
 }
 
-function loadHooks(config: ClawConfig): HookDefinition[] {
+function loadHooks(config: ClawConfig, includeProject: boolean): HookDefinition[] {
   const userSettings = readSettings(path.join(config.homeDir, "settings.json"));
-  const projectSettings = readSettings(path.join(config.workdir, ".claw", "settings.json"));
+  const projectSettings = includeProject
+    ? readSettings(path.join(config.workdir, ".claw", "settings.json"))
+    : {};
   const hooks: HookDefinition[] = [];
   for (const s of [userSettings, projectSettings]) {
     if (!s.hooks) continue;
@@ -73,6 +75,16 @@ function loadHooks(config: ClawConfig): HookDefinition[] {
       if (!Array.isArray(defs)) continue;
       for (const d of defs) {
         if (!d?.command) continue;
+        if (d.matcher) {
+          try {
+            new RegExp(d.matcher);
+          } catch (e: any) {
+            console.warn(
+              `[claw] ignoring hook with invalid matcher regex ${JSON.stringify(d.matcher)}: ${e?.message ?? e}`
+            );
+            continue;
+          }
+        }
         hooks.push({ event: event as HookEvent, matcher: d.matcher, command: d.command });
       }
     }

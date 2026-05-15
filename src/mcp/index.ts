@@ -37,9 +37,19 @@ interface ConnectedServer {
 
 let connected: ConnectedServer[] = [];
 
-export function loadMcpServerSpecs(config: ClawConfig): McpServerSpec[] {
+export function loadMcpServerSpecs(
+  config: ClawConfig,
+  opts: { includeProject?: boolean } = {}
+): McpServerSpec[] {
+  const includeProject = opts.includeProject ?? true;
   const user = readJson(path.join(config.homeDir, "settings.json"));
-  const proj = readJson(path.join(config.workdir, ".claw", "settings.json"));
+  const proj = includeProject ? readJson(path.join(config.workdir, ".claw", "settings.json")) : {};
+  const projNames = Object.keys(proj.mcpServers ?? {});
+  if (!includeProject && projNames.length > 0) {
+    console.warn(
+      `[claw] skipping ${projNames.length} project-level MCP server(s) (untrusted project): ${projNames.join(", ")}`
+    );
+  }
   const merged: Record<string, McpServerConfig> = {
     ...(user.mcpServers ?? {}),
     ...(proj.mcpServers ?? {}),

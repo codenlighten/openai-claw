@@ -33,6 +33,7 @@ import { loadMcpServerSpecs, startMcpServers, disconnectAll } from "./mcp/index.
 import { prepareUserMessage } from "./input.js";
 import { HookRunner } from "./hooks/index.js";
 import { loadTodos } from "./tools/todo.js";
+import { resolveProjectTrust } from "./trust.js";
 
 const PKG_VERSION = "0.1.0";
 
@@ -83,14 +84,15 @@ async function main() {
     process.exit(1);
   }
 
-  const mcpSpecs = loadMcpServerSpecs(config);
+  const trust = await resolveProjectTrust(config, { interactive: !!process.stdin.isTTY });
+  const mcpSpecs = loadMcpServerSpecs(config, { includeProject: trust.trustMcp });
   const mcpTools = mcpSpecs.length > 0 ? await startMcpServers(mcpSpecs) : [];
   if (mcpTools.length > 0) {
     console.error(chalk.dim(`[mcp] loaded ${mcpTools.length} tool(s) from ${mcpSpecs.length} server(s)`));
   }
   const tools = [...getAllTools(config), ...mcpTools];
   const permissions = new PermissionManager(config);
-  const hookRunner = new HookRunner(config);
+  const hookRunner = new HookRunner(config, { includeProject: trust.trustHooks });
   loadTodos(config.memoryDir);
 
   const systemPromptExtras: string[] = [];
