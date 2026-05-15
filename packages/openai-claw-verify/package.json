@@ -1,0 +1,57 @@
+{
+  "name": "@smartledger.technology/openai-claw-verify",
+  "version": "0.1.0",
+  "description": "Standalone verifier for openai-claw attestation sidecars. Recomputes the Merkle root, checks the ML-DSA-65 signature, and (optionally) cross-references each leaf against the session file. No OpenAI / claw / model dependencies.",
+  "author": "Gregory J. Ward <codenlighten1@gmail.com> (CTO, SmartLedger.Technology)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codenlighten/openai-claw.git",
+    "directory": "packages/openai-claw-verify"
+  },
+  "homepage": "https://github.com/codenlighten/openai-claw/tree/main/packages/openai-claw-verify#readme",
+  "bugs": {
+    "url": "https://github.com/codenlighten/openai-claw/issues"
+  },
+  "keywords": [
+    "attestation",
+    "post-quantum",
+    "ml-dsa",
+    "dilithium",
+    "merkle",
+    "audit",
+    "verifier",
+    "openai-claw",
+    "smartledger"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@smartledger/crypto": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^4.0.16"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ]
+}

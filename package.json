@@ -78,5 +78,8 @@
     "dist",
     "README.md",
     "LICENSE"
+  ],
+  "workspaces": [
+    "packages/*"
   ]
 }
