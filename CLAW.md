@@ -48,8 +48,8 @@ Always run `npm run typecheck` and `npm test` before reporting completion of any
 ## Configuration files
 
 - `.env` — `OPENAI_API_KEY`, optional `OPENAI_CLAW_MODEL`. Also loaded from `~/.openai-claw/.env`.
-- `~/.openai-claw/settings.json` — user-level defaults (model, permissionMode, allowedTools/deniedTools, mcpServers, hooks).
-- `<workdir>/.claw/settings.json` — per-project overrides (same shape, wins over user-level).
+- `~/.openai-claw/settings.json` — user-level defaults (model, permissionMode, allowedTools/deniedTools, mcpServers, hooks, `trustedProjects`).
+- `<workdir>/.claw/settings.json` — per-project overrides (same shape, wins over user-level). **Hooks and MCP servers defined here require explicit trust** — the first run prompts and persists the workdir into `trustedProjects`. Non-interactive runs default to deny.
 
 ## What I am
 
