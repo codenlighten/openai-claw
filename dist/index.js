@@ -56,6 +56,12 @@ async function main() {
     if (rawArgs[0] === "dashboard") {
         return runDashboardCli(rawArgs.slice(1));
     }
+    if (rawArgs[0] === "attest") {
+        return runAttestCli(rawArgs.slice(1));
+    }
+    if (rawArgs[0] === "verify") {
+        return runVerifyCli(rawArgs.slice(1));
+    }
     const argv = await yargs(hideBin(process.argv))
         .scriptName("claw")
         .version(PKG_VERSION)
@@ -137,8 +143,18 @@ async function main() {
     }
     if (promptArg && promptArg.length > 0) {
         let sawError = false;
+        // If an attestor identity is configured, start collecting leaves so the
+        // session save below can write a signed sidecar. Untrusted-project runs
+        // and runs without `claw attest init` are unaffected.
+        const { loadIdentity, Attestor } = await import("./attest/index.js");
+        const attestorId = loadIdentity(config);
+        const attestor = attestorId ? new Attestor(attestorId) : null;
+        if (attestor)
+            attestor.record("user_prompt", { content: promptArg });
         agent.pushUser(prepareUserMessage(promptArg, config).content);
         await agent.run((evt) => {
+            if (attestor)
+                attestor.onAgentEvent(evt);
             if (evt.type === "text_delta")
                 process.stdout.write(evt.data);
             if (evt.type === "tool_call") {
@@ -156,10 +172,23 @@ async function main() {
             }
         });
         process.stdout.write("\n");
+        let savedId;
         try {
-            saveSession(config, agent.conversation, printSessionId);
+            const r = saveSession(config, agent.conversation, printSessionId);
+            savedId = r.id;
         }
         catch { }
+        if (attestor && savedId) {
+            try {
+                const attestation = await attestor.finalize(savedId);
+                const sidecar = path.join(config.projectDir, "sessions", `${savedId}.attest.json`);
+                fs.writeFileSync(sidecar, JSON.stringify(attestation, null, 2));
+                console.error(chalk.dim(`[attest] signed ${attestation.header.leafCount} leaf(s), root=${attestation.header.merkleRoot.slice(0, 16)}…, key=${attestation.header.publicKeyId}`));
+            }
+            catch (e) {
+                console.error(chalk.yellow(`[attest] could not write attestation: ${e?.message ?? e}`));
+            }
+        }
         await disconnectAll();
         if (sawError)
             process.exit(1);
@@ -249,6 +278,79 @@ async function runDashboardCli(args) {
     const { startDashboard } = await import("./web/index.js");
     const config = loadConfig();
     await startDashboard(config, port);
+}
+async function runAttestCli(args) {
+    const [sub] = args;
+    const config = loadConfig();
+    const { createIdentity, loadIdentity, identityFile, identityExists } = await import("./attest/index.js");
+    if (!sub || sub === "status") {
+        const id = loadIdentity(config);
+        if (!id) {
+            console.log(chalk.yellow("no attestor identity — run `claw attest init`"));
+            process.exit(0);
+        }
+        console.log(`suite:        ${id.suiteId}`);
+        console.log(`createdAt:    ${id.createdAt}`);
+        console.log(`publicKeyId:  ${id.publicKeyId}`);
+        console.log(`keyFile:      ${identityFile(config)}`);
+        return;
+    }
+    if (sub === "init") {
+        if (identityExists(config)) {
+            console.error(chalk.red(`identity already exists at ${identityFile(config)} — refuse to overwrite`));
+            process.exit(1);
+        }
+        const id = await createIdentity(config);
+        console.log(chalk.green("attestor identity created"));
+        console.log(`suite:        ${id.suiteId}`);
+        console.log(`publicKeyId:  ${id.publicKeyId}`);
+        console.log(`keyFile:      ${identityFile(config)}  (mode 0600)`);
+        console.log("");
+        console.log(chalk.yellow("back this file up off-machine — losing it loses the identity. The private key is NOT recoverable from the public key."));
+        return;
+    }
+    if (sub === "pubkey") {
+        const id = loadIdentity(config);
+        if (!id) {
+            console.error(chalk.red("no identity"));
+            process.exit(1);
+        }
+        console.log(id.publicKey);
+        return;
+    }
+    console.error(chalk.red("usage: claw attest [status|init|pubkey]"));
+    process.exit(2);
+}
+async function runVerifyCli(args) {
+    const sessionId = args[0];
+    if (!sessionId) {
+        console.error(chalk.red('usage: claw verify <session-id> [--strict]'));
+        process.exit(2);
+    }
+    const strict = args.includes("--strict");
+    const config = loadConfig();
+    const sessionsDir = path.join(config.projectDir, "sessions");
+    const attestFile = path.join(sessionsDir, `${sessionId}.attest.json`);
+    const sessionFile = path.join(sessionsDir, `${sessionId}.json`);
+    if (!fs.existsSync(attestFile)) {
+        console.error(chalk.red(`no attestation sidecar found: ${attestFile}`));
+        process.exit(1);
+    }
+    const attestation = JSON.parse(fs.readFileSync(attestFile, "utf8"));
+    const sessionMessages = fs.existsSync(sessionFile)
+        ? JSON.parse(fs.readFileSync(sessionFile, "utf8")).messages
+        : undefined;
+    const { verifyAttestation } = await import("./attest/index.js");
+    const report = await verifyAttestation(attestation, { strict, sessionMessages });
+    const tag = report.ok ? chalk.green("OK") : chalk.red("FAIL");
+    console.log(`verify ${sessionId}: ${tag}`);
+    for (const [k, v] of Object.entries(report.checks)) {
+        const mark = v === true ? chalk.green("✓") : v === false ? chalk.red("✗") : chalk.dim("–");
+        console.log(`  ${mark} ${k}`);
+    }
+    for (const r of report.reasons)
+        console.log(chalk.red(`  · ${r}`));
+    process.exit(report.ok ? 0 : 1);
 }
 main().catch((e) => {
     console.error(chalk.red(e?.stack ?? e?.message ?? String(e)));

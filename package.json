@@ -1,6 +1,6 @@
 {
   "name": "@smartledger.technology/openai-claw",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "A Claude Code clone powered by OpenAI gpt-5-nano",
   "author": "Gregory J. Ward <codenlighten1@gmail.com> (CTO, SmartLedger.Technology)",
   "license": "MIT",
@@ -39,6 +39,9 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
+    "@smartledger.technology/ml-dsa": "^0.2.0",
+    "@smartledger/crypto": "^2.0.0",
+    "@smartledger/keys": "^2.0.0",
     "chalk": "^5.3.0",
     "cli-highlight": "^2.1.11",
     "diff": "^5.2.0",
