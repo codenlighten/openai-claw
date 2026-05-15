@@ -53,3 +53,5 @@ export {
   type AnchorCalendarResponse,
   type AnchorOptions,
 } from "./anchor.js";
+
+export { buildOtsFile, exportOtsFiles, type OtsExport } from "./ots-file.js";

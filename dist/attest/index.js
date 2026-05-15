@@ -14,4 +14,5 @@ export { createIdentity, loadIdentity, identityExists, identityFile, publicView,
 export { Attestor, ATTESTATION_FORMAT } from "./attestor.js";
 export { SessionAttestor } from "./runtime.js";
 export { anchorOpenTimestamps, DEFAULT_OTS_CALENDARS, } from "./anchor.js";
+export { buildOtsFile, exportOtsFiles } from "./ots-file.js";
 //# sourceMappingURL=index.js.map

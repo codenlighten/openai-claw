@@ -319,8 +319,49 @@ async function runAttestCli(args) {
         await runAnchor(config, args.slice(1));
         return;
     }
-    console.error(chalk.red("usage: claw attest [status|init|pubkey|anchor]"));
+    if (sub === "export-ots") {
+        await runExportOts(config, args.slice(1));
+        return;
+    }
+    console.error(chalk.red("usage: claw attest [status|init|pubkey|anchor|export-ots]"));
     process.exit(2);
+}
+async function runExportOts(config, args) {
+    const sessionId = args.find((a) => !a.startsWith("--"));
+    const outDirArg = args.find((a) => a.startsWith("--out="))?.split("=")[1];
+    if (!sessionId) {
+        console.error(chalk.red('usage: claw attest export-ots <session-id> [--out=<dir>]'));
+        process.exit(2);
+    }
+    const { exportOtsFiles } = await import("./attest/index.js");
+    const sidecar = path.join(config.projectDir, "sessions", `${sessionId}.attest.json`);
+    if (!fs.existsSync(sidecar)) {
+        console.error(chalk.red(`no sidecar at ${sidecar}`));
+        process.exit(1);
+    }
+    const attestation = JSON.parse(fs.readFileSync(sidecar, "utf8"));
+    if (!attestation.anchor) {
+        console.error(chalk.red("sidecar has no anchor — run `claw attest anchor` first"));
+        process.exit(1);
+    }
+    const outDir = outDirArg ?? path.dirname(sidecar);
+    if (!fs.existsSync(outDir))
+        fs.mkdirSync(outDir, { recursive: true });
+    const exports = exportOtsFiles(attestation.anchor);
+    if (exports.length === 0) {
+        console.error(chalk.yellow("anchor has no successful calendar responses — nothing to export"));
+        process.exit(1);
+    }
+    for (const e of exports) {
+        const file = path.join(outDir, `${sessionId}.${e.shortName}.ots`);
+        fs.writeFileSync(file, e.bytes);
+        console.log(`  ${chalk.green("✓")} ${file}  ${chalk.dim(`(${e.bytes.length} bytes, ${e.url})`)}`);
+    }
+    console.log("");
+    console.log(chalk.dim("Verify any of these with the standard `ots verify <file>.ots` tool"));
+    console.log(chalk.dim("(install: pip install opentimestamps-client). Pending proofs become"));
+    console.log(chalk.dim("Bitcoin-confirmed automatically within ~3 hours — re-run `ots upgrade`"));
+    console.log(chalk.dim("then `ots verify` to chase the chain anchor."));
 }
 async function runAnchor(config, args) {
     const { anchorOpenTimestamps, canonicalJSON, sha256Hex } = await import("./attest/index.js");
