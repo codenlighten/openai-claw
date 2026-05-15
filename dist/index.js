@@ -34,7 +34,16 @@ import { prepareUserMessage } from "./input.js";
 import { HookRunner } from "./hooks/index.js";
 import { loadTodos } from "./tools/todo.js";
 import { resolveProjectTrust } from "./trust.js";
-const PKG_VERSION = "0.1.0";
+// Read version from package.json at runtime so we can't drift from npm.
+const PKG_VERSION = (() => {
+    try {
+        const pkgPath = path.resolve(here, "..", "package.json");
+        return JSON.parse(fs.readFileSync(pkgPath, "utf8")).version;
+    }
+    catch {
+        return "0.0.0";
+    }
+})();
 async function main() {
     // Top-level subcommands handled before the interactive yargs parser.
     const rawArgs = process.argv.slice(2);
