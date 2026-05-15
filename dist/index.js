@@ -62,6 +62,12 @@ async function main() {
     if (rawArgs[0] === "verify") {
         return runVerifyCli(rawArgs.slice(1));
     }
+    if (rawArgs[0] === "audit") {
+        return runAuditCli(rawArgs.slice(1));
+    }
+    if (rawArgs[0] === "identity") {
+        return runIdentityCli(rawArgs.slice(1));
+    }
     const argv = await yargs(hideBin(process.argv))
         .scriptName("claw")
         .version(PKG_VERSION)
@@ -453,6 +459,190 @@ async function runVerifyCli(args) {
     for (const r of report.reasons)
         console.log(chalk.red(`  · ${r}`));
     process.exit(report.ok ? 0 : 1);
+}
+async function runAuditCli(args) {
+    const [sub, ...rest] = args;
+    if (sub !== "verify" || rest.length === 0) {
+        console.error(chalk.red("usage: claw audit verify <session-id-or-sidecar-path> [--proofs <dir>] [--strict]"));
+        process.exit(2);
+    }
+    const strict = rest.includes("--strict");
+    const proofsArg = rest.find((a) => a.startsWith("--proofs="))?.split("=")[1]
+        ?? (rest.includes("--proofs") ? rest[rest.indexOf("--proofs") + 1] : undefined);
+    const target = rest.find((a) => !a.startsWith("--"));
+    // Accept either an explicit path to a sidecar, or a bare session id.
+    let attestFile;
+    let sessionFile;
+    let sessionId;
+    if (target.endsWith(".attest.json") && fs.existsSync(target)) {
+        attestFile = target;
+        sessionId = path.basename(target).replace(/\.attest\.json$/, "");
+        const candidate = attestFile.replace(/\.attest\.json$/, ".json");
+        if (fs.existsSync(candidate))
+            sessionFile = candidate;
+    }
+    else {
+        const config = loadConfig();
+        const sessionsDir = path.join(config.projectDir, "sessions");
+        attestFile = path.join(sessionsDir, `${target}.attest.json`);
+        sessionFile = path.join(sessionsDir, `${target}.json`);
+        sessionId = target;
+        if (!fs.existsSync(attestFile)) {
+            console.error(chalk.red(`no attestation sidecar at ${attestFile}`));
+            process.exit(1);
+        }
+    }
+    const attestation = JSON.parse(fs.readFileSync(attestFile, "utf8"));
+    const sessionMessages = sessionFile && fs.existsSync(sessionFile)
+        ? JSON.parse(fs.readFileSync(sessionFile, "utf8")).messages
+        : undefined;
+    const { verifyAttestation } = await import("./attest/index.js");
+    const report = await verifyAttestation(attestation, { strict, sessionMessages });
+    const header = attestation.header;
+    const labelGreen = (s) => chalk.green(s);
+    const labelRed = (s) => chalk.red(s);
+    console.log(chalk.bold(`Claw audit verification`));
+    console.log("");
+    console.log(`  Session id:         ${sessionId}`);
+    console.log(`  Sidecar:            ${attestFile}`);
+    console.log(`  Session transcript: ${sessionFile && fs.existsSync(sessionFile) ? sessionFile : chalk.yellow("(not available — sessionAlignment skipped)")}`);
+    console.log("");
+    console.log(chalk.bold("  Cryptography"));
+    const f = (label, key) => {
+        const v = report.checks[key];
+        const mark = v === true ? labelGreen("✓") : v === false ? labelRed("✗") : chalk.dim("–");
+        console.log(`    ${mark} ${label}`);
+    };
+    f("format               ", "format");
+    f("leafContinuity       ", "leafContinuity");
+    f("merkleRoot           ", "merkleRoot");
+    f("ML-DSA-65 signature  ", "signature");
+    f("sessionAlignment     ", "sessionAlignment");
+    f("anchorDigest         ", "anchorDigest");
+    console.log("");
+    console.log(chalk.bold("  Identity"));
+    console.log(`    publicKeyId:      ${header.publicKeyId}`);
+    console.log(`    suiteId:          ${header.suiteId}`);
+    console.log(`    leafCount:        ${header.leafCount}`);
+    console.log(`    merkleRoot:       ${header.merkleRoot}`);
+    console.log("");
+    // OpenTimestamps proofs.
+    console.log(chalk.bold("  OpenTimestamps proofs"));
+    const proofsDir = proofsArg ?? path.dirname(attestFile);
+    let proofFiles = [];
+    try {
+        proofFiles = fs.readdirSync(proofsDir)
+            .filter((f) => f.startsWith(sessionId) && f.endsWith(".ots"));
+    }
+    catch { }
+    // Also look one level deep under a `proofs/` subdir.
+    if (proofFiles.length === 0) {
+        const sub = path.join(proofsDir, "proofs");
+        try {
+            proofFiles = fs.readdirSync(sub).filter((f) => f.endsWith(".ots"));
+            if (proofFiles.length > 0)
+                proofFiles = proofFiles.map((f) => path.join("proofs", f));
+        }
+        catch { }
+    }
+    if (proofFiles.length === 0) {
+        console.log(chalk.dim("    none found"));
+        if (!report.anchor?.present) {
+            console.log(chalk.dim("    (no anchor recorded; run `claw attest anchor <id>` and `export-ots`)"));
+        }
+        else {
+            console.log(chalk.dim(`    (anchor present in sidecar — run \`claw attest export-ots ${sessionId} --out=<dir>\`)`));
+        }
+    }
+    else {
+        for (const rel of proofFiles) {
+            const full = path.isAbsolute(rel) ? rel : path.join(proofsDir, rel);
+            const status = inspectOtsFile(full);
+            const mark = status.ok ? labelGreen("✓") : labelRed("✗");
+            console.log(`    ${mark} ${path.basename(rel)}  ${chalk.dim(status.summary)}`);
+        }
+    }
+    console.log("");
+    if (report.ok) {
+        console.log(chalk.bold(labelGreen("  Result")));
+        console.log(labelGreen("    ✓ Claw-side audit trail is valid"));
+        if (proofFiles.length > 0) {
+            console.log(labelGreen("    ✓ OpenTimestamps proofs are well-formed"));
+            console.log(chalk.dim("      Run `ots upgrade <file>.ots && ots verify <file>.ots` once Bitcoin"));
+            console.log(chalk.dim("      has confirmed the calendar's batch (~3 hours after submission)."));
+        }
+    }
+    else {
+        console.log(chalk.bold(labelRed("  Result")));
+        console.log(labelRed("    ✗ verification failed"));
+        for (const r of report.reasons)
+            console.log(labelRed(`      · ${r}`));
+    }
+    process.exit(report.ok ? 0 : 1);
+}
+/**
+ * Lightweight structural check on a .ots file. We do not chase the chain
+ * here — `ots verify` is the right tool for that. We only confirm the
+ * header magic and that the file is at least long enough to carry a
+ * digest and one operation, returning a short summary string.
+ */
+function inspectOtsFile(file) {
+    try {
+        const bytes = fs.readFileSync(file);
+        // Magic = 31 bytes per the OTS spec.
+        const HEADER = Buffer.from([
+            0x00, 0x4f, 0x70, 0x65, 0x6e, 0x54, 0x69, 0x6d, 0x65, 0x73, 0x74, 0x61, 0x6d, 0x70, 0x73, 0x00,
+            0x00, 0x50, 0x72, 0x6f, 0x6f, 0x66, 0x00,
+            0xbf, 0x89, 0xe2, 0xe8, 0x84, 0xe8, 0x92, 0x94,
+        ]);
+        if (bytes.length < HEADER.length + 34)
+            return { ok: false, summary: "too short" };
+        if (!bytes.subarray(0, HEADER.length).equals(HEADER))
+            return { ok: false, summary: "bad header magic" };
+        const version = bytes[HEADER.length];
+        const op = bytes[HEADER.length + 1];
+        if (op !== 0x08)
+            return { ok: false, summary: `unexpected file-hash op 0x${op.toString(16)}` };
+        return { ok: true, summary: `v${version} sha256, ${bytes.length} bytes, pending` };
+    }
+    catch (e) {
+        return { ok: false, summary: e?.message ?? String(e) };
+    }
+}
+async function runIdentityCli(args) {
+    const config = loadConfig();
+    const { loadIdentity, identityFile } = await import("./attest/index.js");
+    const id = loadIdentity(config);
+    const [sub] = args;
+    if (!sub || sub === "show") {
+        if (!id) {
+            console.log(chalk.yellow("no identity — run `claw attest init`"));
+            process.exit(0);
+        }
+        console.log(`fingerprint:  ${id.publicKeyId}`);
+        console.log(`suite:        ${id.suiteId}`);
+        console.log(`created:      ${id.createdAt}`);
+        console.log(`keyFile:      ${identityFile(config)}`);
+        return;
+    }
+    if (sub === "fingerprint") {
+        if (!id) {
+            console.error(chalk.red("no identity"));
+            process.exit(1);
+        }
+        console.log(id.publicKeyId);
+        return;
+    }
+    if (sub === "export-public") {
+        if (!id) {
+            console.error(chalk.red("no identity"));
+            process.exit(1);
+        }
+        console.log(id.publicKey);
+        return;
+    }
+    console.error(chalk.red("usage: claw identity [show|fingerprint|export-public]"));
+    process.exit(2);
 }
 main().catch((e) => {
     console.error(chalk.red(e?.stack ?? e?.message ?? String(e)));

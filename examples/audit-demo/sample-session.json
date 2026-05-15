@@ -1,0 +1,61 @@
+{
+  "id": "2026-05-15T16-50-15-588Z-6a8f",
+  "workdir": "/tmp/tmp.w48QDqUIIj",
+  "model": "gpt-5-nano",
+  "savedAt": "2026-05-15T16:50:15.588Z",
+  "preview": "Write a hello world Python script to a file called hello.py, then read it back t",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are openai-claw, a CLI assistant for software engineering tasks. You are modeled after Anthropic's Claude Code but powered by OpenAI's API.\n\n# Identity\n- All text you output outside of tool use is shown to the user. Use it to communicate; tool calls happen silently.\n- You may call multiple tools in a single response when there are no dependencies between them — this is the efficient default.\n- Tool execution requires the user's permission unless preconfigured. Denied tools should prompt a change of approach, not a retry.\n\n# Tools available\n## Built-in tools\n- Read: Read a file from the local filesystem. Use absolute paths. Text files return lines prefixed with line numbers (cat -n format); use offset/limit for large files. .pdf files extract text (use `pages` like '1-5'); .ipynb files return cell sources and outputs.\n- Write: Write contents to a file. Creates the file if missing, overwrites if it exists. Use absolute paths. For modifying existing files, prefer the Edit tool instead — it only sends the diff.\n- Edit: Perform an exact string replacement in a file. old_string must be unique unless replace_all is true. Preserve exact indentation. For renames or sweeping changes, use replace_all.\n- Bash: Execute a bash command. Working directory persists, shell state does not. Always quote paths with spaces. Output is truncated at 100k chars. Timeout defaults to 120s (max 600s). Set run_in_background=true to start a long-running shell and get back a shell_id; poll it with BashOutput and stop it with KillShell.\n- BashOutput: Retrieve new output from a background Bash shell since the last poll. Returns the shell's status (running/exited/killed) and the new stdout+stderr bytes. Use this to monitor long-running jobs you launched with Bash(run_in_background: true).\n- KillShell: Terminate a background Bash shell by id. Sends SIGTERM, then SIGKILL after 2s.\n- Grep: Search file contents using ripgrep-style regex. Supports glob filters, content/files-with-matches/count output, line numbers, context lines, and multiline mode. Prefer this over `grep` via Bash.\n- Glob: Find files matching a glob pattern (e.g. '**/*.ts', 'src/**/index.js'). Returns results sorted by modification time.\n- LS: List files and directories at the given absolute path.\n- Semantic: Search the project by semantic meaning, not literal pattern. Returns the top-K most relevant code chunks ranked by embedding similarity. Use this when the user describes what they want by intent (e.g. \"where is auth checked?\") rather than by exact string. Falls back to a helpful error if the index hasn't been built — run /index first.\n- WebFetch: Fetch a URL and extract its content as plain text. The `prompt` argument is a question or instruction; the page text is included in the returned content so the calling model can answer it. Responses are cached per-URL for 15 minutes.\n- WebSearch: Search the web for a query. Returns a list of result titles, URLs, and snippets. Useful for current events or recent docs the model wouldn't know.\n- TodoWrite: Create and manage a structured todo list for the current session. Use for tasks that span 3+ steps. Replace the whole list each call. Mark exactly one item in_progress at a time. The list is persisted to disk and survives /resume.\n\n## Subagents\n- Task: Launch a subagent to handle complex multi-step work in an isolated context. Use for: open-ended research, parallel investigations, or tasks whose tool output would crowd the parent's context. Brief the subagent thoroughly — it sees none of this conversation. Set isolation=\"worktree\" to run the subagent in a temporary git worktree; the returned text will include the diff.\nAvailable subagent types:\n- general-purpose: General-purpose subagent with the full tool set. Use for open-ended multi-step tasks.\n- explore (tools: Read,Grep,Glob,LS,WebFetch,WebSearch): Read-only search subagent. Use for locating code, files, references.\n\n# Doing tasks\n- The user will primarily request software engineering tasks: bugs, features, refactors, explanations, etc. Treat ambiguous requests as software tasks in the context of the current working directory.\n- Prefer editing existing files over creating new ones. Never create README/docs files unless asked.\n- Don't add features, abstractions, or error handling beyond what the task requires. Trust framework guarantees; validate only at system boundaries.\n- Don't write comments that restate what code does. Only write comments explaining a non-obvious WHY (a hidden constraint, a workaround, a surprising invariant).\n- Investigate failures at the root cause. Never use destructive shortcuts (`--no-verify`, `git reset --hard`, `rm -rf` on unknown state) to make obstacles go away.\n\n# Tool-call discipline\n- Parallel tool calls are great when the calls are independent (e.g. reading 10 different files). Do this aggressively.\n- Do NOT issue parallel Edit calls against the same file — the first edit mutates the file and the later ones will fail with 'old_string not found'. For a single file: issue Edit calls sequentially (one per assistant turn), or rewrite the whole file with Write if changes are extensive.\n- After an Edit fails, re-Read the file before retrying — the content has likely shifted.\n- Preserve the existing indentation style of a file you're editing (tabs vs. spaces). Look at neighboring lines.\n\n# Executing actions with care\n- Local, reversible actions (editing files, running tests, reading state) are fine.\n- Risky actions (force pushes, deleting branches, dropping tables, removing packages, sending messages, posting to PRs/issues, modifying CI) require confirmation unless the user has explicitly authorized them for the current scope.\n- A user approving once doesn't mean approval forever — match action scope to what was requested.\n\n# Tone and style\n- Be concise. A simple question gets a direct answer, not headers and sections.\n- Don't narrate internal deliberation. State results and decisions directly.\n- One-or-two-sentence end-of-turn summary: what changed and what's next.\n- When referencing code locations, use `file_path:line_number` so the user can navigate.\n\n# Output conventions\n- No emojis unless the user explicitly asks.\n- Markdown is rendered as monospace CommonMark.\n\n# Multimodal input\n- The user can attach images via @path.png or the /img command. When you receive image content, describe what you see, extract text via OCR if relevant, or take action based on the image as instructed. If the current model doesn't support vision, say so plainly rather than hallucinating image contents.\n- When an image is already attached to the user's message, do NOT call the Read tool on the image file path — Read returns the raw binary bytes, which are useless to you. Use the attached image directly. Only call Read on the image's file path if the user explicitly asks you to inspect the file's bytes (e.g. checking a header or magic number).\n\n# Environment\nPrimary working directory: /tmp/tmp.w48QDqUIIj\nPlatform: linux\nShell: /bin/bash\nOS Version: 6.17.0-23-generic\n\n\n# Session\nToday's date: 2026-05-15\nYou are powered by OpenAI's 'gpt-5-nano' model.\n\n"
+    },
+    {
+      "role": "user",
+      "content": "Write a hello world Python script to a file called hello.py, then read it back to verify."
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_qBGP5jasfU32iv0rQTPSKXlX",
+          "type": "function",
+          "function": {
+            "name": "Write",
+            "arguments": "{\"file_path\":\"/tmp/tmp.w48QDqUIIj/hello.py\",\"content\":\"#!/usr/bin/env python3\\nprint(\\\"Hello, world!\\\")\\n\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_qBGP5jasfU32iv0rQTPSKXlX",
+      "name": "Write",
+      "content": "Created /tmp/tmp.w48QDqUIIj/hello.py (46 bytes)"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_Q2ZjDhjE2EoND6EWlqwN0koH",
+          "type": "function",
+          "function": {
+            "name": "Read",
+            "arguments": "{\"file_path\":\"/tmp/tmp.w48QDqUIIj/hello.py\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_Q2ZjDhjE2EoND6EWlqwN0koH",
+      "name": "Read",
+      "content": "     1\t#!/usr/bin/env python3\n     2\tprint(\"Hello, world!\")\n     3\t"
+    },
+    {
+      "role": "assistant",
+      "content": "Created and verified:\n- Path: /tmp/tmp.w48QDqUIIj/hello.py (46 bytes)\n\nContents:\n#!/usr/bin/env python3\nprint(\"Hello, world!\")\n\nYou can run it with:\npython3 /tmp/tmp.w48QDqUIIj/hello.py"
+    }
+  ]
+}
