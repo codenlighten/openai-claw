@@ -5,3 +5,7 @@ node_modules/
 .DS_Store
 .openai-claw/
 .npmrc
+
+# Local working notes — not for the repo.
+STATUS.md
+
