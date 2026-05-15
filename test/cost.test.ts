@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -9,6 +9,7 @@ import {
   readCostLog,
   costByDay,
   costByModel,
+  _resetCostLogWarned,
 } from "../src/cost.js";
 import type { ClawConfig } from "../src/config.js";
 
@@ -91,5 +92,27 @@ describe("cost log", () => {
     const byModel = costByModel(entries);
     expect(byModel.map((m) => m.model)).toContain("gpt-5");
     expect(byModel.map((m) => m.model)).toContain("gpt-5-nano");
+  });
+
+  it("warns to stderr once when log writes fail, never throws", () => {
+    _resetCostLogWarned();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const appendSpy = vi.spyOn(fs, "appendFileSync").mockImplementation(() => {
+      throw new Error("disk full");
+    });
+    try {
+      const c = cfg();
+      for (let i = 0; i < 5; i++) {
+        expect(() =>
+          appendCostLog(c, { model: "gpt-5-nano", prompt_tokens: 1, cached_tokens: 0, completion_tokens: 1, costUSD: 0 })
+        ).not.toThrow();
+      }
+      expect(errSpy).toHaveBeenCalledTimes(1);
+      expect(errSpy.mock.calls[0][0]).toMatch(/cost log write failed/);
+    } finally {
+      appendSpy.mockRestore();
+      errSpy.mockRestore();
+      _resetCostLogWarned();
+    }
   });
 });

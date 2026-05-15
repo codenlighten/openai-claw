@@ -71,4 +71,24 @@ describe("PermissionManager", () => {
     const r = await pm.check("Bash", { command: "ls" });
     expect(r.allow).toBe(true);
   });
+
+  it("'always' scopes to the described key, not the bare tool name", async () => {
+    const pm = new PermissionManager(cfg());
+    pm.setPrompter(async () => "always");
+    const npm = await pm.check("Bash", { command: "npm test" });
+    expect(npm.allow).toBe(true);
+    // A subsequent rm command must NOT be auto-allowed by the prior "always"
+    // for npm — the prompter should fire again. Flip it to "no" to verify.
+    let prompted = 0;
+    pm.setPrompter(async () => {
+      prompted++;
+      return "no";
+    });
+    const rm = await pm.check("Bash", { command: "rm -rf /" });
+    expect(rm.allow).toBe(false);
+    expect(prompted).toBe(1);
+    // But a second npm command (same prefix) is silently allowed.
+    const npm2 = await pm.check("Bash", { command: "npm install" });
+    expect(npm2.allow).toBe(true);
+  });
 });

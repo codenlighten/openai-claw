@@ -38,8 +38,8 @@ export function listMemories(config: ClawConfig): MemoryEntry[] {
         body: parsed.content.trim(),
         file: full,
       });
-    } catch {
-      // skip malformed
+    } catch (e: any) {
+      console.warn(`[claw] ignoring malformed memory ${full}: ${e?.message ?? e}`);
     }
   }
   return entries;

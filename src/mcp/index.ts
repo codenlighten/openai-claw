@@ -98,6 +98,7 @@ async function connectOne(spec: McpServerSpec): Promise<ConnectedServer> {
   const tools: Tool[] = list.tools.map((t: any) => wrapTool(spec.name, client, t));
 
   // Resources and prompts are optional; servers may not implement them.
+  // -32601 = JSON-RPC "Method not found"; expected from servers that opt out.
   let resources: ConnectedServer["resources"] = [];
   let prompts: ConnectedServer["prompts"] = [];
   try {
@@ -107,14 +108,22 @@ async function connectOne(spec: McpServerSpec): Promise<ConnectedServer> {
       name: x.name,
       description: x.description,
     }));
-  } catch {}
+  } catch (e: any) {
+    if (e?.code !== -32601) {
+      console.warn(`[claw] MCP '${spec.name}' listResources failed: ${e?.message ?? e}`);
+    }
+  }
   try {
     const p = await client.listPrompts();
     prompts = (p.prompts ?? []).map((x: any) => ({
       name: x.name,
       description: x.description,
     }));
-  } catch {}
+  } catch (e: any) {
+    if (e?.code !== -32601) {
+      console.warn(`[claw] MCP '${spec.name}' listPrompts failed: ${e?.message ?? e}`);
+    }
+  }
 
   return { name: spec.name, client, tools, resources, prompts };
 }
