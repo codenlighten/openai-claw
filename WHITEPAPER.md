@@ -2,7 +2,7 @@
 
 ### Cryptographic Audit Trails for AI Tool Use
 
-**Draft v1 — May 2026**
+**v1.0 — May 2026**
 
 **Gregory J. Ward** · CTO, SmartLedger.Technology · `greg@smartledger.technology`
 **Bryan W. Daugherty** · Co-founder, SmartLedger.Technology
@@ -10,7 +10,7 @@
 
 *Reference implementation: `@smartledger.technology/openai-claw` v0.5.0 (npm). Verifier: `@smartledger.technology/openai-claw-verify` v0.2.0 (npm). Source: https://github.com/codenlighten/openai-claw.*
 
-*This is a public draft. Comments to the authors. Cite as: G. J. Ward, B. W. Daugherty, S. M. Ryan, "No Trust in the Agent: Cryptographic Audit Trails for AI Tool Use", SmartLedger.Technology, May 2026.*
+*Cite as: G. J. Ward, B. W. Daugherty, S. M. Ryan, "No Trust in the Agent: Cryptographic Audit Trails for AI Tool Use", SmartLedger.Technology, May 2026.*
 
 ---
 
