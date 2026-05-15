@@ -32,7 +32,7 @@ Claw audit verification
 
 ## Audit quickstart
 
-The audit story is reproducible in five commands. The full reproducible demo (with committed fixtures) lives in [`examples/audit-demo`](./examples/audit-demo/).
+The audit story is reproducible in five commands. The full reproducible demo (with committed fixtures) lives in [`examples/audit-demo`](./examples/audit-demo/). The protocol and threat model are described in the whitepaper, [No Trust in the Agent](./WHITEPAPER.md).
 
 ```bash
 npm install -g @smartledger.technology/openai-claw
