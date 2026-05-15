@@ -43,6 +43,10 @@ export async function compactIfNeeded(
   const middle = messages.slice(1, -8);
   if (middle.length === 0) return null;
 
+  // Long tool outputs would otherwise dominate the summary input; cap each
+  // message at config.maxToolResultChars so verbose results don't crowd
+  // out the conversational signal compaction is meant to preserve.
+  const perMsgCap = Math.max(500, config.maxToolResultChars);
   const transcript = middle
     .map((m) => {
       const tag = m.role.toUpperCase();
@@ -53,7 +57,7 @@ export async function compactIfNeeded(
           .map((p) => (p.type === "text" ? p.text : "[image]"))
           .join(" ");
       } else body = "(tool call)";
-      return `[${tag}] ${body.slice(0, 4000)}`;
+      return `[${tag}] ${body.slice(0, perMsgCap)}`;
     })
     .join("\n\n");
 

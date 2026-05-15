@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { type Tool, ok, err } from "./types.js";
 import type { ClawConfig } from "../config.js";
 
@@ -27,7 +28,7 @@ function shellsDir(config: ClawConfig): string {
 }
 
 function nextShellId(): string {
-  return `sh_${Date.now().toString(36)}_${Math.floor(Math.random() * 0xfff).toString(16)}`;
+  return `sh_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
 }
 
 /** Spawn a background shell. Caller is responsible for messaging the agent. */
@@ -37,12 +38,19 @@ export function spawnBackgroundShell(config: ClawConfig, command: string): Backg
   const logFile = path.join(dir, `${id}.log`);
   const out = fs.openSync(logFile, "w");
 
-  const child = spawn("bash", ["-c", command], {
-    cwd: config.workdir,
-    env: process.env,
-    stdio: ["ignore", out, out],
-    detached: true,
-  });
+  let child: ChildProcess;
+  try {
+    child = spawn("bash", ["-c", command], {
+      cwd: config.workdir,
+      env: process.env,
+      stdio: ["ignore", out, out],
+      detached: true,
+    });
+  } catch (e) {
+    // Don't leak the log fd if the spawn itself fails (e.g. ENOENT bash).
+    try { fs.closeSync(out); } catch {}
+    throw e;
+  }
   child.unref();
 
   const shell: BackgroundShell = {

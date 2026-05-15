@@ -414,7 +414,6 @@ export const builtinCommands: SlashCommand[] = [
           return;
         }
         const body = fs.readFileSync(tmp, "utf8").trim();
-        fs.unlinkSync(tmp);
         if (!body) {
           console.log(chalk.dim("(empty — discarded)"));
           return;
@@ -423,6 +422,8 @@ export const builtinCommands: SlashCommand[] = [
         console.log(chalk.dim(`queued ${body.length} chars — press Enter to send`));
       } catch (e: any) {
         console.log(chalk.red(`/vim failed: ${e?.message ?? e}`));
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
       }
     },
   },
