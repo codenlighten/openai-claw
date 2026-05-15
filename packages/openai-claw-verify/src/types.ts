@@ -41,11 +41,34 @@ export interface AttestationHeader {
   publicKeyId: string;
 }
 
+/**
+ * Anchor data added by `claw attest anchor`. Optional — sidecars produced by
+ * the in-session attestation flow do not carry one until anchoring is run.
+ * The verifier does not check the anchor against Bitcoin (use standard OTS
+ * tooling for that); it only reports the anchor's presence and digest match.
+ */
+export interface AnchorCalendarResponse {
+  url: string;
+  ok: boolean;
+  response?: string;
+  error?: string;
+}
+
+export interface AnchorProof {
+  type: "opentimestamps-pending";
+  /** Hex sha256 — the digest that was submitted; must equal sha256(canonical-JSON(header)). */
+  digest: string;
+  submittedAt: string;
+  calendars: AnchorCalendarResponse[];
+}
+
 export interface Attestation {
   header: AttestationHeader;
   leaves: Leaf[];
   /** base64-encoded signature over canonical-JSON(header) */
   signature: string;
+  /** Present after `claw attest anchor` has been run on this session. */
+  anchor?: AnchorProof;
 }
 
 /**
@@ -83,5 +106,14 @@ export interface VerifyReport {
     merkleRoot: boolean;
     leafContinuity: boolean;
     sessionAlignment?: boolean;
+    /** Anchor digest matches sha256(canonical-JSON(header)). Skipped when no anchor. */
+    anchorDigest?: boolean;
+  };
+  /** Surfaced for downstream tools that want to display anchor status. */
+  anchor?: {
+    present: boolean;
+    type?: string;
+    submittedAt?: string;
+    acceptedBy?: string[];
   };
 }

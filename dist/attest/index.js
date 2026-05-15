@@ -13,4 +13,5 @@ export { canonicalJSON, hashPayload, hashLeaf, sha256Hex, merkleRoot, merkleProo
 export { createIdentity, loadIdentity, identityExists, identityFile, publicView, ATTEST_SUITE_ID, } from "./identity.js";
 export { Attestor, ATTESTATION_FORMAT } from "./attestor.js";
 export { SessionAttestor } from "./runtime.js";
+export { anchorOpenTimestamps, DEFAULT_OTS_CALENDARS, } from "./anchor.js";
 //# sourceMappingURL=index.js.map

@@ -1,6 +1,6 @@
 {
   "name": "@smartledger.technology/openai-claw-verify",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone verifier for openai-claw attestation sidecars. Recomputes the Merkle root, checks the ML-DSA-65 signature, and (optionally) cross-references each leaf against the session file. No OpenAI / claw / model dependencies.",
   "author": "Gregory J. Ward <codenlighten1@gmail.com> (CTO, SmartLedger.Technology)",
   "license": "MIT",

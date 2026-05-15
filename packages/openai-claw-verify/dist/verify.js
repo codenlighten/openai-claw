@@ -1,5 +1,5 @@
 import { MlDsa65Suite } from "@smartledger/crypto";
-import { canonicalJSON, hashLeaf, hashPayload } from "./leaf.js";
+import { canonicalJSON, hashLeaf, hashPayload, sha256Hex } from "./leaf.js";
 import { merkleRoot } from "./merkle.js";
 const SUPPORTED_FORMATS = new Set(["openai-claw.attestation.v1"]);
 const SUPPORTED_SUITES = new Set(["ml-dsa-65"]);
@@ -66,10 +66,32 @@ export async function verifyAttestation(attestation, opts = {}) {
         if (!alignment.ok)
             reasons.push(...alignment.reasons);
     }
+    // Anchor presence/digest check. We don't talk to Bitcoin here — that's
+    // standard OTS tooling's job — but we do verify the anchored digest is
+    // what we'd submit for THIS header.
+    let anchorSummary;
+    if (attestation.anchor) {
+        const expected = sha256Hex(canonicalJSON(attestation.header));
+        const match = expected === attestation.anchor.digest;
+        checks.anchorDigest = match;
+        if (!match) {
+            reasons.push(`anchor digest does not match sha256(header): got ${attestation.anchor.digest}, expected ${expected}`);
+        }
+        anchorSummary = {
+            present: true,
+            type: attestation.anchor.type,
+            submittedAt: attestation.anchor.submittedAt,
+            acceptedBy: attestation.anchor.calendars.filter((c) => c.ok).map((c) => c.url),
+        };
+    }
+    else {
+        anchorSummary = { present: false };
+    }
     return {
         ok: reasons.length === 0,
         reasons,
         checks,
+        anchor: anchorSummary,
     };
 }
 function checkSessionAlignment(leaves, messages) {

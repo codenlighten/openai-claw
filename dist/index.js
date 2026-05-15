@@ -315,8 +315,66 @@ async function runAttestCli(args) {
         console.log(id.publicKey);
         return;
     }
-    console.error(chalk.red("usage: claw attest [status|init|pubkey]"));
+    if (sub === "anchor") {
+        await runAnchor(config, args.slice(1));
+        return;
+    }
+    console.error(chalk.red("usage: claw attest [status|init|pubkey|anchor]"));
     process.exit(2);
+}
+async function runAnchor(config, args) {
+    const { anchorOpenTimestamps, canonicalJSON, sha256Hex } = await import("./attest/index.js");
+    const sessionsDir = path.join(config.projectDir, "sessions");
+    if (!fs.existsSync(sessionsDir)) {
+        console.error(chalk.yellow("no sessions to anchor in this project"));
+        return;
+    }
+    const all = args.includes("--all");
+    const target = args.find((a) => !a.startsWith("--"));
+    if (!all && !target) {
+        console.error(chalk.red("usage: claw attest anchor <session-id> | --all"));
+        process.exit(2);
+    }
+    // Find candidate sidecars.
+    let sidecars;
+    if (all) {
+        sidecars = fs
+            .readdirSync(sessionsDir)
+            .filter((f) => f.endsWith(".attest.json"))
+            .map((f) => path.join(sessionsDir, f));
+    }
+    else {
+        const p = path.join(sessionsDir, `${target}.attest.json`);
+        if (!fs.existsSync(p)) {
+            console.error(chalk.red(`no sidecar found for session ${target}`));
+            process.exit(1);
+        }
+        sidecars = [p];
+    }
+    if (sidecars.length === 0) {
+        console.log(chalk.yellow("no attestation sidecars in this project"));
+        return;
+    }
+    for (const sidecarPath of sidecars) {
+        const attestation = JSON.parse(fs.readFileSync(sidecarPath, "utf8"));
+        if (attestation.anchor && !args.includes("--force")) {
+            console.log(chalk.dim(`skip (already anchored): ${path.basename(sidecarPath)}`));
+            continue;
+        }
+        const digest = sha256Hex(canonicalJSON(attestation.header));
+        console.log(chalk.dim(`anchor ${path.basename(sidecarPath)}  digest=${digest.slice(0, 16)}…`));
+        const proof = await anchorOpenTimestamps(digest);
+        attestation.anchor = proof;
+        fs.writeFileSync(sidecarPath, JSON.stringify(attestation, null, 2));
+        const ok = proof.calendars.filter((c) => c.ok).length;
+        const total = proof.calendars.length;
+        const tag = ok > 0 ? chalk.green(`${ok}/${total} accepted`) : chalk.red(`${ok}/${total} accepted`);
+        console.log(`  ${tag}`);
+        for (const c of proof.calendars) {
+            const mark = c.ok ? chalk.green("✓") : chalk.red("✗");
+            console.log(`  ${mark} ${c.url}${c.error ? "  " + chalk.dim(c.error) : ""}`);
+        }
+    }
 }
 async function runVerifyCli(args) {
     const sessionId = args[0];
@@ -344,6 +402,12 @@ async function runVerifyCli(args) {
     for (const [k, v] of Object.entries(report.checks)) {
         const mark = v === true ? chalk.green("✓") : v === false ? chalk.red("✗") : chalk.dim("–");
         console.log(`  ${mark} ${k}`);
+    }
+    if (report.anchor?.present) {
+        console.log(chalk.dim(`  anchor: ${report.anchor.type} submitted=${report.anchor.submittedAt} accepted_by=${report.anchor.acceptedBy?.length ?? 0}`));
+    }
+    else {
+        console.log(chalk.dim("  anchor: none (run `claw attest anchor <id>` to publish)"));
     }
     for (const r of report.reasons)
         console.log(chalk.red(`  · ${r}`));

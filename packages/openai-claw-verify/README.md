@@ -19,6 +19,7 @@ npm install @smartledger.technology/openai-claw-verify
 | `merkleRoot` | recomputing `merkleRoot(hash(leaves))` matches `header.merkleRoot` — no leaf was added, removed, or modified |
 | `signature` | ML-DSA-65 (NIST FIPS-204, post-quantum) signature on `canonical-JSON(header)` verifies under the embedded public key — header is authentic |
 | `sessionAlignment` (optional) | hashing the user_prompt / assistant_text / tool_call payloads found in the session file matches the leaves' `payloadHash` values — the sidecar is bound to *this* session, not a forgery |
+| `anchorDigest` (when anchored) | the anchor's submitted digest equals `sha256(canonical-JSON(header))` — the anchor proves the **right** root |
 
 All hashes are sha256. Canonicalization is JCS-style (RFC 8785): sorted keys, no whitespace, ASCII-safe.
 
@@ -46,6 +47,10 @@ console.log("verified.");
 ## Why post-quantum
 
 ML-DSA-65 (formerly CRYSTALS-Dilithium, NIST Level 3) is the NIST FIPS-204 standard for digital signatures resistant to attack by a future cryptographically-relevant quantum computer. Choosing it now turns claw's audit log into evidence that remains valid through the classical-quantum transition — a deliberate choice for long-lived compliance, legal, and supply-chain artifacts.
+
+## Anchoring (optional)
+
+Sidecars produced by `claw attest anchor` carry a public-blockchain anchor in the `anchor` field. The verifier checks that the submitted digest matches the header (so the anchor proves the correct root), surfaces `acceptedBy` (the calendars that returned a proof), and reports the anchor's submission time. Full Bitcoin-chain verification is intentionally out of scope — point the `ots verify` standard tool at the calendar responses to chase the chain anchor down. The verifier's job is only to certify the *claw side* of the cryptography.
 
 ## Standalone
 

@@ -45,3 +45,11 @@ export {
 export { Attestor, ATTESTATION_FORMAT } from "./attestor.js";
 
 export { SessionAttestor, type SessionAttestorOptions } from "./runtime.js";
+
+export {
+  anchorOpenTimestamps,
+  DEFAULT_OTS_CALENDARS,
+  type AnchorProof,
+  type AnchorCalendarResponse,
+  type AnchorOptions,
+} from "./anchor.js";

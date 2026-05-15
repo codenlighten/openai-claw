@@ -21,6 +21,8 @@ export type {
   SessionMessage,
   VerifyOptions,
   VerifyReport,
+  AnchorProof,
+  AnchorCalendarResponse,
 } from "./types.js";
 
 export type { MerkleStep } from "./merkle.js";

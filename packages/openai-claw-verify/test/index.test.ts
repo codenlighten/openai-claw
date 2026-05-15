@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { MlDsa65Suite } from "@smartledger/crypto";
+import { createHash } from "node:crypto";
 import {
   canonicalJSON,
   hashLeaf,
@@ -10,7 +11,37 @@ import {
   verifyAttestation,
   type Attestation,
   type Leaf,
+  type AnchorProof,
 } from "../src/index.js";
+
+const sha256Hex = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
+
+async function makeSignedAttestation(): Promise<{ attestation: Attestation; pub: Uint8Array; priv: Uint8Array }> {
+  const suite = new MlDsa65Suite();
+  const kp = await suite.generateKeypair();
+  const leaves: Leaf[] = [
+    { v: 1, seq: 0, ts: "2026-01-01T00:00:00Z", kind: "user_prompt", payloadHash: hashPayload({ content: "hi" }) },
+  ];
+  const root = merkleRoot(leaves.map(hashLeaf));
+  const header = {
+    v: 1 as const,
+    format: "openai-claw.attestation.v1" as const,
+    sessionId: "s-anchor",
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: "2026-01-01T00:00:01Z",
+    leafCount: 1,
+    merkleRoot: root,
+    suiteId: "ml-dsa-65",
+    publicKey: Buffer.from(kp.publicKey).toString("base64"),
+    publicKeyId: "test-key",
+  };
+  const sig = await suite.sign(kp.privateKey, Buffer.from(canonicalJSON(header), "utf8"));
+  return {
+    attestation: { header, leaves, signature: Buffer.from(sig).toString("base64") },
+    pub: kp.publicKey,
+    priv: kp.privateKey,
+  };
+}
 
 describe("canonicalJSON", () => {
   it("sorts object keys", () => {
@@ -109,6 +140,47 @@ describe("verifyAttestation end-to-end", () => {
     const report = await verifyAttestation(attestation);
     expect(report.ok).toBe(false);
     expect(report.checks.merkleRoot).toBe(false);
+  });
+
+  it("reports absent anchor without failing the overall check", async () => {
+    const { attestation } = await makeSignedAttestation();
+    const report = await verifyAttestation(attestation);
+    expect(report.ok).toBe(true);
+    expect(report.anchor?.present).toBe(false);
+    expect(report.checks.anchorDigest).toBeUndefined();
+  });
+
+  it("accepts a well-formed anchor and reports it", async () => {
+    const { attestation } = await makeSignedAttestation();
+    const digest = sha256Hex(canonicalJSON(attestation.header));
+    const anchor: AnchorProof = {
+      type: "opentimestamps-pending",
+      digest,
+      submittedAt: "2026-01-02T00:00:00Z",
+      calendars: [
+        { url: "https://alice.btc.calendar.opentimestamps.org", ok: true, response: "AAAA" },
+        { url: "https://bob.btc.calendar.opentimestamps.org", ok: false, error: "HTTP 503" },
+      ],
+    };
+    const report = await verifyAttestation({ ...attestation, anchor });
+    expect(report.ok).toBe(true);
+    expect(report.checks.anchorDigest).toBe(true);
+    expect(report.anchor?.present).toBe(true);
+    expect(report.anchor?.acceptedBy).toEqual(["https://alice.btc.calendar.opentimestamps.org"]);
+  });
+
+  it("rejects an anchor whose digest does not match the header", async () => {
+    const { attestation } = await makeSignedAttestation();
+    const anchor: AnchorProof = {
+      type: "opentimestamps-pending",
+      digest: "0".repeat(64),
+      submittedAt: "2026-01-02T00:00:00Z",
+      calendars: [],
+    };
+    const report = await verifyAttestation({ ...attestation, anchor });
+    expect(report.ok).toBe(false);
+    expect(report.checks.anchorDigest).toBe(false);
+    expect(report.reasons.join(" ")).toMatch(/anchor digest does not match/);
   });
 
   it("detects a tampered header by failed signature", async () => {
