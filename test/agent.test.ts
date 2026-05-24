@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Agent, normalizeNulls, validateToolInput, type AgentClient, type AgentEvent } from "../src/agent.js";
+import { Agent, normalizeNulls, sanitizeMessages, validateToolInput, type AgentClient, type AgentEvent } from "../src/agent.js";
 import { makeStrictSchema } from "../src/client.js";
 import type { CompletionResult, ChatMessage } from "../src/client.js";
 import type { Tool } from "../src/tools/types.js";
@@ -595,5 +595,155 @@ describe("makeStrictSchema", () => {
     });
     expect(result.properties.mode.type).toEqual(["string", "null"]);
     expect(result.properties.mode.enum).toEqual(["a", "b", null]);
+  });
+});
+
+describe("sanitizeMessages", () => {
+  function asst(tool_calls: { id: string; name: string }[]): ChatMessage {
+    return {
+      role: "assistant",
+      content: null,
+      tool_calls: tool_calls.map((t) => ({
+        id: t.id,
+        type: "function",
+        function: { name: t.name, arguments: "{}" },
+      })),
+    } as ChatMessage;
+  }
+  function toolMsg(id: string, content = "ok"): ChatMessage {
+    return { role: "tool", tool_call_id: id, content } as ChatMessage;
+  }
+
+  it("passes a well-formed conversation through unchanged", () => {
+    const msgs: ChatMessage[] = [
+      { role: "system", content: "you are a bot" },
+      { role: "user", content: "hi" },
+      asst([{ id: "c1", name: "Bash" }]),
+      toolMsg("c1", "result"),
+      { role: "assistant", content: "done" },
+    ];
+    const before = JSON.stringify(msgs);
+    const { injected, dropped } = sanitizeMessages(msgs);
+    expect(injected).toBe(0);
+    expect(dropped).toBe(0);
+    expect(JSON.stringify(msgs)).toBe(before);
+  });
+
+  it("injects a placeholder for an orphaned tool_call_id", () => {
+    // This is the exact shape the OpenAI 400 complains about: assistant has
+    // tool_calls but the next message is a user turn, no tool response.
+    const msgs: ChatMessage[] = [
+      asst([{ id: "c-leak", name: "Bash" }]),
+      { role: "user", content: "continue" },
+    ];
+    const { injected, dropped } = sanitizeMessages(msgs);
+    expect(injected).toBe(1);
+    expect(dropped).toBe(0);
+    expect(msgs).toHaveLength(3);
+    expect(msgs[1].role).toBe("tool");
+    expect((msgs[1] as any).tool_call_id).toBe("c-leak");
+    expect(msgs[2].role).toBe("user");
+  });
+
+  it("injects placeholders only for missing ids in a partially-responded multi-call", () => {
+    const msgs: ChatMessage[] = [
+      asst([
+        { id: "c1", name: "Read" },
+        { id: "c2", name: "Read" },
+        { id: "c3", name: "Read" },
+      ]),
+      toolMsg("c1"),
+      toolMsg("c3"),
+      { role: "user", content: "what now" },
+    ];
+    const { injected, dropped } = sanitizeMessages(msgs);
+    expect(injected).toBe(1);
+    expect(dropped).toBe(0);
+    // c2 placeholder should land right after c3, before the user message.
+    const toolIds = msgs.filter((m) => m.role === "tool").map((m) => (m as any).tool_call_id);
+    expect(toolIds).toEqual(["c1", "c3", "c2"]);
+  });
+
+  it("drops tool messages whose tool_call_id has no matching assistant", () => {
+    const msgs: ChatMessage[] = [
+      { role: "user", content: "hi" },
+      toolMsg("ghost"),
+      { role: "assistant", content: "hello" },
+    ];
+    const { injected, dropped } = sanitizeMessages(msgs);
+    expect(injected).toBe(0);
+    expect(dropped).toBe(1);
+    expect(msgs).toHaveLength(2);
+    expect(msgs.some((m) => m.role === "tool")).toBe(false);
+  });
+
+  it("repairs the exact corruption pattern reported in production", () => {
+    // Reproduces the user-reported 400: an assistant emits tool_calls, the
+    // dispatch loop dies before pushing tool responses (e.g. throwing hook),
+    // the user types `continue`. Without sanitization, every subsequent API
+    // call returns the same 400 forever.
+    const msgs: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "init repo and push" },
+      asst([{ id: "call_8CurbYA6gtHx4RuiJFB6CXUG", name: "Bash" }]),
+      { role: "user", content: "continue" },
+    ];
+    const { injected } = sanitizeMessages(msgs);
+    expect(injected).toBe(1);
+    const placeholder = msgs[3];
+    expect(placeholder.role).toBe("tool");
+    expect((placeholder as any).tool_call_id).toBe("call_8CurbYA6gtHx4RuiJFB6CXUG");
+    expect(String(placeholder.content)).toMatch(/no response captured/);
+  });
+});
+
+describe("dispatch resilience (hooks must not orphan tool_call_ids)", () => {
+  it("paired tool message is pushed even when PostToolUse hook throws", async () => {
+    const client = new ScriptedClient([
+      withToolCalls([{ id: "c-hook", name: "echo", arguments: { msg: "hi" } }]),
+      textOnly("done"),
+    ]);
+    const agent = new Agent({
+      config: cfg(),
+      tools: [dummyTool()],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+      runHook: async (event) => {
+        if (event === "PostToolUse") throw new Error("hook crashed");
+        return [];
+      },
+    });
+    agent.pushUser("go");
+    const { events, handler } = collect();
+    await agent.run(handler);
+
+    // The conversation must contain a tool message for c-hook — otherwise the
+    // next API call would 400 with the exact bug from the user report.
+    const toolMsgs = agent.conversation.filter((m) => m.role === "tool");
+    expect(toolMsgs).toHaveLength(1);
+    expect((toolMsgs[0] as any).tool_call_id).toBe("c-hook");
+    expect(events[events.length - 1].type).toBe("done");
+  });
+
+  it("paired tool message is pushed even when permissionCheck throws", async () => {
+    const client = new ScriptedClient([
+      withToolCalls([{ id: "c-perm", name: "echo", arguments: {} }]),
+      textOnly("ok then"),
+    ]);
+    const agent = new Agent({
+      config: cfg(),
+      tools: [dummyTool({ needsPermission: true })],
+      permissionCheck: async () => {
+        throw new Error("user aborted prompt");
+      },
+      client,
+    });
+    agent.pushUser("try");
+    const { events, handler } = collect();
+    await agent.run(handler);
+    const toolMsgs = agent.conversation.filter((m) => m.role === "tool");
+    expect(toolMsgs).toHaveLength(1);
+    expect((toolMsgs[0] as any).tool_call_id).toBe("c-perm");
+    expect(String(toolMsgs[0].content)).toMatch(/Permission denied/);
   });
 });
