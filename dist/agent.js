@@ -12,81 +12,95 @@ function truncateForModel(s, cap) {
 /**
  * Repair a conversation so OpenAI's strict tool-call contract is satisfied.
  *
- * OpenAI rejects any request where an assistant message with `tool_calls`
- * isn't immediately followed by `role: "tool"` messages responding to every
- * `tool_call_id`. Conversations can drift out of compliance for two reasons:
+ * OpenAI rejects any request where a tool message's `tool_call_id` does not
+ * appear in the `tool_calls` of the immediately preceding assistant. The
+ * contract is positional, not "valid somewhere in the history". Conversations
+ * drift out of compliance via:
  *   1. A thrown hook / aborted permission prompt kills the dispatch loop
- *      between "assistant pushed" and "tool messages pushed".
- *   2. Compaction trims the message window in a way that splits a tool-call
+ *      between "assistant pushed" and "tool messages pushed" → orphan
+ *      assistant with no responses.
+ *   2. Two assistant turns get appended back-to-back with their tool messages
+ *      pushed after both — so each tool ends up in the wrong slot.
+ *   3. Compaction trims the message window in a way that splits a tool-call
  *      from its responses.
  *
- * Both manifest as `400 Bad Request: tool_call_ids did not have response
- * messages: …`. Once the conversation is in this state it stays broken
- * forever — every retry hits the same error.
+ * All three produce the same family of 400 errors (`did not have response
+ * messages` OR `not found in tool_calls of previous message`). Once stuck,
+ * every retry hits the same error.
  *
- * This function mutates `messages` in place:
- *   - For each assistant message with tool_calls, ensures every id has a
- *     matching subsequent tool message before the next assistant/user turn.
- *     Missing ones get a placeholder tool message inserted right after.
- *   - Drops tool messages whose tool_call_id has no preceding assistant.
+ * This function rebuilds the conversation in canonical order: tool messages
+ * are pulled out, then re-inserted immediately after the assistant that
+ * declared their `tool_call_id`. Missing responses get a placeholder; tool
+ * messages whose id doesn't match any assistant tool_call are dropped.
  *
- * Returns the count of injections + drops (useful for logging / tests).
+ * Mutates `messages` in place. Returns counters for logging/tests.
  */
 export function sanitizeMessages(messages) {
     let injected = 0;
     let dropped = 0;
-    // Pass 1: collect every valid tool_call_id from assistant messages.
-    const validIds = new Set();
+    let reordered = 0;
+    // Index every tool message by its tool_call_id (first occurrence wins),
+    // and remember each tool message's original index for reorder detection.
+    const toolByCallId = new Map();
+    const originalToolIdx = new Map();
+    const allToolMsgs = [];
+    messages.forEach((m, i) => {
+        if (m.role !== "tool")
+            return;
+        allToolMsgs.push(m);
+        originalToolIdx.set(m, i);
+        const id = m.tool_call_id;
+        if (id && !toolByCallId.has(id))
+            toolByCallId.set(id, m);
+    });
+    // Rebuild: keep every non-tool message in order, and after each assistant
+    // with tool_calls, append its tool responses in declaration order.
+    const rebuilt = [];
+    const placedIds = new Set();
     for (const m of messages) {
-        if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+        if (m.role === "tool")
+            continue; // tool messages re-emitted below
+        rebuilt.push(m);
+        if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
             for (const tc of m.tool_calls) {
-                if (tc?.id)
-                    validIds.add(tc.id);
+                if (!tc?.id)
+                    continue;
+                const responder = toolByCallId.get(tc.id);
+                if (responder) {
+                    rebuilt.push(responder);
+                    placedIds.add(tc.id);
+                }
+                else {
+                    rebuilt.push({
+                        role: "tool",
+                        tool_call_id: tc.id,
+                        name: tc.function?.name,
+                        content: `(no response captured — tool dispatch did not complete; treat as no-op and retry if needed)`,
+                    });
+                    injected++;
+                }
             }
         }
     }
-    // Pass 2: drop orphaned tool messages (no matching assistant tool_call).
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i];
-        if (m.role === "tool" && (!m.tool_call_id || !validIds.has(m.tool_call_id))) {
-            messages.splice(i, 1);
+    // dropped = tool messages whose id never matched any assistant tool_call.
+    for (const t of allToolMsgs) {
+        const id = t.tool_call_id;
+        if (!id || !placedIds.has(id))
             dropped++;
-        }
     }
-    // Pass 3: walk forward; after each assistant-with-tool_calls, inject a
-    // placeholder tool message for any id not already responded to before the
-    // next non-tool message.
-    for (let i = 0; i < messages.length; i++) {
-        const m = messages[i];
-        if (m.role !== "assistant" || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0)
-            continue;
-        const needed = new Set(m.tool_calls.map((tc) => tc.id).filter(Boolean));
-        let j = i + 1;
-        while (j < messages.length && messages[j].role === "tool") {
-            const id = messages[j].tool_call_id;
-            if (id)
-                needed.delete(id);
-            j++;
-        }
-        if (needed.size === 0)
-            continue;
-        const placeholders = [];
-        for (const tc of m.tool_calls) {
-            if (!tc?.id || !needed.has(tc.id))
-                continue;
-            placeholders.push({
-                role: "tool",
-                tool_call_id: tc.id,
-                name: tc.function?.name,
-                content: `(no response captured — tool dispatch failed before completing; treat as no-op and retry if needed)`,
-            });
-            injected++;
-        }
-        messages.splice(j, 0, ...placeholders);
-        // Skip past the placeholders we just inserted.
-        i = j + placeholders.length - 1;
+    // reordered = tool messages that ended up at a different absolute index.
+    rebuilt.forEach((m, i) => {
+        if (m.role !== "tool")
+            return;
+        const old = originalToolIdx.get(m);
+        if (old !== undefined && old !== i)
+            reordered++;
+    });
+    if (rebuilt.length !== messages.length || injected || dropped || reordered) {
+        messages.length = 0;
+        messages.push(...rebuilt);
     }
-    return { injected, dropped };
+    return { injected, dropped, reordered };
 }
 /**
  * Walk a parsed tool-call input and replace `null` with `undefined` so tools
@@ -275,8 +289,8 @@ export class Agent {
             // assistant tool_call that has no matching tool response, which OpenAI
             // rejects with a 400 that persists across retries until repaired.
             const sanitize = sanitizeMessages(this.messages);
-            if ((sanitize.injected || sanitize.dropped) && process.env.CLAW_DEBUG) {
-                console.error(`[claw] sanitized conversation: injected=${sanitize.injected} dropped=${sanitize.dropped}`);
+            if ((sanitize.injected || sanitize.dropped || sanitize.reordered) && process.env.CLAW_DEBUG) {
+                console.error(`[claw] sanitized conversation: injected=${sanitize.injected} dropped=${sanitize.dropped} reordered=${sanitize.reordered}`);
             }
             const role = this.nextModelRole;
             this.nextModelRole = "default";

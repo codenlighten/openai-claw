@@ -623,15 +623,15 @@ describe("sanitizeMessages", () => {
       { role: "assistant", content: "done" },
     ];
     const before = JSON.stringify(msgs);
-    const { injected, dropped } = sanitizeMessages(msgs);
+    const { injected, dropped, reordered } = sanitizeMessages(msgs);
     expect(injected).toBe(0);
     expect(dropped).toBe(0);
+    expect(reordered).toBe(0);
     expect(JSON.stringify(msgs)).toBe(before);
   });
 
   it("injects a placeholder for an orphaned tool_call_id", () => {
-    // This is the exact shape the OpenAI 400 complains about: assistant has
-    // tool_calls but the next message is a user turn, no tool response.
+    // assistant has tool_calls but the next message is a user turn — no tool response.
     const msgs: ChatMessage[] = [
       asst([{ id: "c-leak", name: "Bash" }]),
       { role: "user", content: "continue" },
@@ -659,9 +659,9 @@ describe("sanitizeMessages", () => {
     const { injected, dropped } = sanitizeMessages(msgs);
     expect(injected).toBe(1);
     expect(dropped).toBe(0);
-    // c2 placeholder should land right after c3, before the user message.
+    // Canonical order: c1, c2 (placeholder), c3 — each in declaration order.
     const toolIds = msgs.filter((m) => m.role === "tool").map((m) => (m as any).tool_call_id);
-    expect(toolIds).toEqual(["c1", "c3", "c2"]);
+    expect(toolIds).toEqual(["c1", "c2", "c3"]);
   });
 
   it("drops tool messages whose tool_call_id has no matching assistant", () => {
@@ -677,23 +677,41 @@ describe("sanitizeMessages", () => {
     expect(msgs.some((m) => m.role === "tool")).toBe(false);
   });
 
-  it("repairs the exact corruption pattern reported in production", () => {
-    // Reproduces the user-reported 400: an assistant emits tool_calls, the
-    // dispatch loop dies before pushing tool responses (e.g. throwing hook),
-    // the user types `continue`. Without sanitization, every subsequent API
-    // call returns the same 400 forever.
+  it("repairs back-to-back assistants with separated tool responses (the prod corruption)", () => {
+    // Exact saved-session shape: two assistant tool_calls in a row, then both
+    // responses. OpenAI rejects this because each tool's "previous message"
+    // doesn't include its tool_call_id. Sanitize must reorder.
+    const msgs: ChatMessage[] = [
+      asst([{ id: "call_8CurbYA6gtHx4RuiJFB6CXUG", name: "Bash" }]),
+      asst([{ id: "call_yRVKzo34WlaTO6YmghjlHNb6", name: "Bash" }]),
+      toolMsg("call_8CurbYA6gtHx4RuiJFB6CXUG", "DONE"),
+      toolMsg("call_yRVKzo34WlaTO6YmghjlHNb6", "Reinitialized…"),
+      { role: "user", content: "continue" },
+    ];
+    const { injected, dropped, reordered } = sanitizeMessages(msgs);
+    expect(injected).toBe(0);
+    expect(dropped).toBe(0);
+    expect(reordered).toBeGreaterThan(0);
+    expect(msgs).toHaveLength(5);
+    expect(msgs[0].role).toBe("assistant");
+    expect(msgs[1].role).toBe("tool");
+    expect((msgs[1] as any).tool_call_id).toBe("call_8CurbYA6gtHx4RuiJFB6CXUG");
+    expect(msgs[2].role).toBe("assistant");
+    expect(msgs[3].role).toBe("tool");
+    expect((msgs[3] as any).tool_call_id).toBe("call_yRVKzo34WlaTO6YmghjlHNb6");
+    expect(msgs[4].role).toBe("user");
+  });
+
+  it("handles orphan asst with no response anywhere (worst case)", () => {
     const msgs: ChatMessage[] = [
       { role: "system", content: "sys" },
-      { role: "user", content: "init repo and push" },
-      asst([{ id: "call_8CurbYA6gtHx4RuiJFB6CXUG", name: "Bash" }]),
+      asst([{ id: "call_orphan", name: "Bash" }]),
       { role: "user", content: "continue" },
     ];
     const { injected } = sanitizeMessages(msgs);
     expect(injected).toBe(1);
-    const placeholder = msgs[3];
-    expect(placeholder.role).toBe("tool");
-    expect((placeholder as any).tool_call_id).toBe("call_8CurbYA6gtHx4RuiJFB6CXUG");
-    expect(String(placeholder.content)).toMatch(/no response captured/);
+    expect(msgs[2].role).toBe("tool");
+    expect(String(msgs[2].content)).toMatch(/no response captured/);
   });
 });
 
