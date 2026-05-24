@@ -9,3 +9,6 @@ node_modules/
 # Local working notes — not for the repo.
 STATUS.md
 
+# Scratch/probe scripts — not for the repo.
+scratch/
+

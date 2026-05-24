@@ -41,6 +41,7 @@ ${toolList}
 
 # Tool-call discipline
 - Parallel tool calls are great when the calls are independent (e.g. reading 10 different files). Do this aggressively.
+- When debugging across files (compile errors, missing symbols, redefinitions), start with a parallel Grep for the failing symbol(s) — do NOT begin with LS or one Read at a time. Bulk-discover, then make one coherent edit pass.
 - Do NOT issue parallel Edit calls against the same file — the first edit mutates the file and the later ones will fail with 'old_string not found'. For a single file: issue Edit calls sequentially (one per assistant turn), or rewrite the whole file with Write if changes are extensive.
 - After an Edit fails, re-Read the file before retrying — the content has likely shifted.
 - Preserve the existing indentation style of a file you're editing (tabs vs. spaces). Look at neighboring lines.

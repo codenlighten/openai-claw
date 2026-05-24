@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { Agent, type AgentClient, type AgentEvent } from "../src/agent.js";
+import { Agent, normalizeNulls, validateToolInput, type AgentClient, type AgentEvent } from "../src/agent.js";
+import { makeStrictSchema } from "../src/client.js";
 import type { CompletionResult, ChatMessage } from "../src/client.js";
 import type { Tool } from "../src/tools/types.js";
 import type { ClawConfig } from "../src/config.js";
@@ -420,5 +421,179 @@ describe("Agent.run", () => {
     ]);
     expect(agent.conversation[0]).toBe(origSys);
     expect(agent.conversation[1].content).toBe("old msg");
+  });
+
+  it("validates required fields and short-circuits the bad call", async () => {
+    // The model used to crash inside tool internals when a required field was
+    // missing (e.g. path.resolve(undefined)). Now the dispatch layer rejects
+    // the call up front with a directive message.
+    const client = new ScriptedClient([
+      withToolCalls([{ id: "c1", name: "needsFile", arguments: {} }]),
+      textOnly("ok"),
+    ]);
+    let runCalled = false;
+    const tool: Tool = {
+      name: "needsFile",
+      description: "needs a file_path",
+      needsPermission: false,
+      mutates: false,
+      parameters: {
+        type: "object",
+        properties: { file_path: { type: "string" } },
+        required: ["file_path"],
+      },
+      async run() {
+        runCalled = true;
+        return { content: "ran" };
+      },
+    };
+    const agent = new Agent({
+      config: cfg(),
+      tools: [tool],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.pushUser("go");
+    const { events, handler } = collect();
+    await agent.run(handler);
+    expect(runCalled).toBe(false);
+    const err = events.find((e) => e.type === "tool_result" && e.data.isError === true);
+    expect(err?.data.content).toMatch(/missing required field/);
+  });
+
+  it("normalizes null values from strict-mode optional fields to undefined", async () => {
+    // Strict mode forces the model to emit nulls for omitted optional fields.
+    // Tools were written against the non-strict shape, so the dispatch layer
+    // collapses nulls back to undefined before calling run().
+    const client = new ScriptedClient([
+      withToolCalls([
+        { id: "c1", name: "opt", arguments: { needed: "x", optional: null } },
+      ]),
+      textOnly("done"),
+    ]);
+    let seenInput: any = null;
+    const tool: Tool = {
+      name: "opt",
+      description: "has an optional field",
+      needsPermission: false,
+      mutates: false,
+      parameters: {
+        type: "object",
+        properties: {
+          needed: { type: "string" },
+          optional: { type: ["string", "null"] },
+        },
+        required: ["needed", "optional"],
+      },
+      async run(input) {
+        seenInput = input;
+        return { content: "ok" };
+      },
+    };
+    const agent = new Agent({
+      config: cfg(),
+      tools: [tool],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.pushUser("go");
+    const { events, handler } = collect();
+    await agent.run(handler);
+    expect(seenInput).toEqual({ needed: "x", optional: undefined });
+  });
+});
+
+describe("normalizeNulls", () => {
+  it("replaces null with undefined recursively but leaves other values alone", () => {
+    const input = { a: null, b: "ok", c: { d: null, e: 1 }, f: [null, "x", { g: null }] };
+    normalizeNulls(input);
+    expect(input).toEqual({ a: undefined, b: "ok", c: { d: undefined, e: 1 }, f: [undefined, "x", { g: undefined }] });
+  });
+
+  it("returns scalars and nulls unchanged when passed at the top level", () => {
+    expect(normalizeNulls(null)).toBe(null);
+    expect(normalizeNulls(undefined)).toBe(undefined);
+    expect(normalizeNulls(5)).toBe(5);
+    expect(normalizeNulls("x")).toBe("x");
+  });
+});
+
+describe("validateToolInput", () => {
+  const schema = {
+    properties: {
+      file_path: { type: "string" },
+      offset: { type: "number" },
+    },
+    required: ["file_path"],
+  };
+
+  it("returns null when required fields are present and non-empty", () => {
+    expect(validateToolInput({ file_path: "/x" }, schema)).toBeNull();
+    expect(validateToolInput({ file_path: "/x", offset: 10 }, schema)).toBeNull();
+  });
+
+  it("flags missing required fields with a directive message", () => {
+    const msg = validateToolInput({}, schema);
+    expect(msg).toMatch(/missing required field/);
+    expect(msg).toMatch(/file_path/);
+  });
+
+  it("flags empty required strings", () => {
+    const msg = validateToolInput({ file_path: "" }, schema);
+    expect(msg).toMatch(/must not be empty/);
+    expect(msg).toMatch(/file_path/);
+  });
+});
+
+describe("makeStrictSchema", () => {
+  it("adds every property to required and marks optional ones nullable", () => {
+    const result = makeStrictSchema({
+      type: "object",
+      properties: {
+        a: { type: "string" },
+        b: { type: "number" },
+      },
+      required: ["a"],
+    });
+    expect(result.required).toEqual(["a", "b"]);
+    expect(result.additionalProperties).toBe(false);
+    expect(result.properties.a.type).toBe("string");
+    expect(result.properties.b.type).toEqual(["number", "null"]);
+  });
+
+  it("recurses into nested objects and array items", () => {
+    const result = makeStrictSchema({
+      type: "object",
+      properties: {
+        todos: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              content: { type: "string" },
+              activeForm: { type: "string" },
+            },
+            required: ["content"],
+          },
+        },
+      },
+      required: ["todos"],
+    });
+    expect(result.properties.todos.type).toBe("array");
+    expect(result.properties.todos.items.required).toEqual(["content", "activeForm"]);
+    expect(result.properties.todos.items.additionalProperties).toBe(false);
+    expect(result.properties.todos.items.properties.activeForm.type).toEqual(["string", "null"]);
+  });
+
+  it("adds null to enums when the field becomes nullable", () => {
+    const result = makeStrictSchema({
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["a", "b"] },
+      },
+      required: [],
+    });
+    expect(result.properties.mode.type).toEqual(["string", "null"]);
+    expect(result.properties.mode.enum).toEqual(["a", "b", null]);
   });
 });

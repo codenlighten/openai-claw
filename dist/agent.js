@@ -9,6 +9,79 @@ function truncateForModel(s, cap) {
     const dropped = s.length - cap;
     return s.slice(0, cap) + `\n[truncated: ${dropped} chars dropped — re-run with narrower args]`;
 }
+/**
+ * Walk a parsed tool-call input and replace `null` with `undefined` so tools
+ * written against the original (non-strict) schema don't have to special-case
+ * the nullable values strict mode forces the model to emit for optional fields.
+ * Mutates and returns the input.
+ */
+export function normalizeNulls(input) {
+    if (input == null || typeof input !== "object")
+        return input;
+    if (Array.isArray(input)) {
+        for (let i = 0; i < input.length; i++) {
+            if (input[i] === null)
+                input[i] = undefined;
+            else
+                normalizeNulls(input[i]);
+        }
+        return input;
+    }
+    for (const k of Object.keys(input)) {
+        if (input[k] === null)
+            input[k] = undefined;
+        else
+            normalizeNulls(input[k]);
+    }
+    return input;
+}
+/**
+ * Validate parsed tool input against the tool's JSON schema. Catches missing
+ * required fields and empty required strings BEFORE they reach the tool's run()
+ * body (where they would otherwise crash inside Node internals like
+ * `path.resolve(undefined)` or `undefined.replace(...)`).
+ *
+ * Must be called BEFORE normalizeNulls — strict-mode optional fields are sent
+ * as `null` (an intentional "absent" marker), distinct from a truly missing
+ * key. We treat the schema's `required` list as "key must be present"; the
+ * non-nullable subset additionally must not be null or an empty string.
+ *
+ * Returns null on success or a directive error message the model can act on.
+ */
+export function validateToolInput(input, schema) {
+    const required = schema.required ?? [];
+    const properties = schema.properties ?? {};
+    const missing = [];
+    const empty = [];
+    for (const key of required) {
+        if (input == null || !(key in input)) {
+            missing.push(key);
+            continue;
+        }
+        const val = input[key];
+        const propType = properties[key]?.type;
+        const nullable = Array.isArray(propType) && propType.includes("null");
+        // For non-nullable required fields, null/undefined is "missing".
+        if (!nullable && val == null) {
+            missing.push(key);
+            continue;
+        }
+        const isString = propType === "string" || (Array.isArray(propType) && propType.includes("string"));
+        if (isString && typeof val === "string" && val.length === 0) {
+            empty.push(key);
+        }
+    }
+    if (missing.length === 0 && empty.length === 0)
+        return null;
+    const parts = [];
+    if (missing.length) {
+        parts.push(`missing required field(s): ${missing.join(", ")}`);
+    }
+    if (empty.length) {
+        parts.push(`required field(s) must not be empty: ${empty.join(", ")}`);
+    }
+    return `Invalid arguments — ${parts.join("; ")}. Re-issue the call with all required fields filled in.`;
+}
 export class Agent {
     opts;
     client;
@@ -201,6 +274,21 @@ export class Agent {
             handler({ type: "tool_result", data: { name: tool.name, content: msg, isError: true } });
             return msg;
         }
+        // Validate against the tool's schema BEFORE calling run(). Missing required
+        // fields previously crashed inside Node internals (e.g. path.resolve(undefined))
+        // and surfaced as confusing errors like 'paths[0] must be of type string'.
+        // Validation must run BEFORE null-normalization — strict-mode optional fields
+        // arrive as legitimate nulls that we must NOT confuse with truly-missing keys.
+        const validationError = validateToolInput(parsedInput, tool.parameters);
+        if (validationError) {
+            const msg = `${tool.name}: ${validationError}`;
+            handler({ type: "tool_result", data: { name: tool.name, content: msg, isError: true, callId: call.id } });
+            return msg;
+        }
+        // Strict-mode schemas force optional fields to be present (often as null).
+        // Tools were written against the non-strict shape, so collapse nulls back
+        // to undefined before dispatch.
+        normalizeNulls(parsedInput);
         handler({
             type: "tool_call",
             data: { name: tool.name, input: parsedInput, preview: tool.preview?.(parsedInput), callId: call.id },

@@ -6,6 +6,62 @@ export function resolveModel(config: ClawConfig, role: ModelRole = "default"): s
   return config.models?.[role] ?? config.model;
 }
 
+/**
+ * Convert a tool's JSON schema into an OpenAI strict-mode-compatible shape:
+ *  - every property listed in `required` (optional fields become nullable)
+ *  - `additionalProperties: false` on every object
+ *  - recurses into nested objects and array items
+ *
+ * Strict mode prevents the entire class of "missing required field" crashes
+ * that would otherwise blow up inside tool internals (path.resolve(undefined),
+ * undefined.replace(...), etc).
+ */
+export function makeStrictSchema(schema: any): any {
+  if (!schema || typeof schema !== "object") return schema;
+  const out: any = Array.isArray(schema) ? [...schema] : { ...schema };
+
+  if (out.type === "object" && out.properties && typeof out.properties === "object") {
+    const props = out.properties as Record<string, any>;
+    const existingRequired = new Set<string>(Array.isArray(out.required) ? out.required : []);
+    const newProps: Record<string, any> = {};
+    const allKeys: string[] = [];
+    for (const [key, prop] of Object.entries(props)) {
+      let recursed = makeStrictSchema(prop);
+      if (!existingRequired.has(key)) {
+        recursed = makeNullable(recursed);
+      }
+      newProps[key] = recursed;
+      allKeys.push(key);
+    }
+    out.properties = newProps;
+    out.required = allKeys;
+    out.additionalProperties = false;
+  }
+
+  if (out.type === "array" && out.items) {
+    out.items = makeStrictSchema(out.items);
+  }
+
+  return out;
+}
+
+function makeNullable(schema: any): any {
+  if (!schema || typeof schema !== "object") return schema;
+  const out: any = { ...schema };
+  const t = out.type;
+  if (typeof t === "string" && t !== "null") {
+    out.type = [t, "null"];
+  } else if (Array.isArray(t) && !t.includes("null")) {
+    out.type = [...t, "null"];
+  }
+  // If the field has an enum, the model can still pick null when omitting —
+  // adding null to the enum keeps strict-mode validation happy.
+  if (Array.isArray(out.enum) && !out.enum.includes(null)) {
+    out.enum = [...out.enum, null];
+  }
+  return out;
+}
+
 export class FriendlyApiError extends Error {
   readonly retryable: boolean;
   constructor(message: string, retryable: boolean) {
@@ -130,12 +186,16 @@ export class OpenAIClient {
       model?: string;
     } = {}
   ): Promise<CompletionResult> {
+    // Strict-mode tool calls eliminate the "model emits a Read with no
+    // file_path" failure class server-side. Opt-out via OPENAI_CLAW_STRICT_TOOLS=0.
+    const strictTools = process.env.OPENAI_CLAW_STRICT_TOOLS !== "0";
     const toolDefs = tools.map((t) => ({
       type: "function" as const,
       function: {
         name: t.name,
         description: t.description,
-        parameters: t.parameters,
+        parameters: strictTools ? makeStrictSchema(t.parameters) : t.parameters,
+        ...(strictTools ? { strict: true } : {}),
       },
     }));
 
