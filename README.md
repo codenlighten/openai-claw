@@ -60,6 +60,7 @@ ots verify proofs/*.ots                              # standard Python OTS tool
 3. **The Merkle root was signed by the local ML-DSA-65 identity.** Post-quantum (NIST FIPS-204) signature verifies under the public key embedded in the sidecar.
 4. **The `.ots` files are independently parseable** by the standard OpenTimestamps tool — claw is not in the verification path.
 5. **The audit-side package verifies without trusting the runtime agent.** `@smartledger.technology/openai-claw-verify` has zero dependency on claw, OpenAI, or the model.
+6. **Which remote MCP server supplied each tool call.** When the agent uses an `mcp__<server>__<tool>` capability, the server attachment, the tool advertisement, and per-call provenance (`mcp_attach`, `mcp_tool_offered`, `mcpProvenance`) are signed into the same Merkle tree — a verifier can prove not just that a tool ran, but where the tool came from.
 
 ## What is not proven
 
@@ -69,7 +70,7 @@ This honesty is what makes the project defensible:
 2. **The user intended every action the AI took.** Verification proves what happened, not what was wanted.
 3. **The terminal environment was clean.** If the local machine was compromised at the time of the session, the attestor could have been fed false data — the signature would still verify.
 4. **The model was honest internally.** Verification covers the I/O boundary. It says nothing about model alignment, hallucination, or intent.
-5. **The Bitcoin block has confirmed yet.** Initial OTS proofs are pending. Run `ots upgrade` after ~3 hours to fetch the upgraded proof, then `ots verify`.
+5. **Bitcoin block confirmation, immediately.** Initial OTS proofs are pending — they become Bitcoin-confirmed after the calendars' daily merge (~3 hours). Run `ots upgrade` after that to fetch the upgraded proof, then `ots verify`.
 
 ---
 
@@ -152,7 +153,9 @@ Resumed sessions (`--continue`) currently skip attestation and preserve any exis
 
 ---
 
-## Features (other)
+## Agent capabilities
+
+Alongside the audit story, claw is a full coding agent — competitive surface with Claude Code, Codex-style CLIs, and Aider:
 
 - **Interactive UI** — ink-based TUI by default; pass `--no-tui` for the readline REPL fallback. Streaming output, `Ctrl-C` to abort a turn.
 - **Core tools** — `Read`, `Write`, `Edit`, `Bash`, `Grep` (ripgrep), `Glob`, `LS`, `WebFetch`, `WebSearch`, `Task`, `TodoWrite`, plus background-shell `BashOutput` / `KillShell`
@@ -165,7 +168,7 @@ Resumed sessions (`--continue`) currently skip attestation and preserve any exis
 - **Persistent memory** — `MEMORY.md` index + per-entry frontmatter files
 - **Sessions** — every run is saved under `~/.openai-claw/projects/<slug>/sessions/`; `--continue`, `/sessions`, `/fork` restore or branch them
 - **Context compaction** — older turns are summarized as the conversation approaches the model's context window
-- **Semantic index (RAG)** — `/index` embeds the working tree with `text-embedding-3-small`; the agent can query via the `SemanticSearch` tool
+- **Semantic index (RAG)** — `/index` embeds the working tree with `text-embedding-3-small`; the agent can query via the `Semantic` tool
 - **Cost tracking** — per-turn cost is logged to `cost.log` and surfaced via `/cost` and the optional dashboard
 - **MCP** — stdio and streamable-HTTP MCP clients; remote tools wrapped as `mcp__<server>__<tool>`
 - **Plugins** — `claw install <git-url>` / `claw uninstall <name>` / `claw plugins [list|search]`
@@ -234,6 +237,24 @@ One-shot:
 claw -p "summarize what this repo does in one paragraph"
 ```
 
+A typical interactive turn looks like:
+
+```
+> fix the typo in src/server.ts around line 42
+
+▸ Read src/server.ts
+▸ Edit src/server.ts
+  @@ -42,1 +42,1 @@
+  -    cosole.log("starting server");
+  +    console.log("starting server");
+
+Fixed: `cosole` → `console` on line 42.
+
+● openai-claw model=gpt-5-nano tokens=4127 $0.0003
+```
+
+Parallel tool calls (e.g. reading ten files at once), background bash shells, slash commands (`/sessions`, `/fork`, `/index`, `/review`, …), and persistent sessions all work as you'd expect.
+
 If `claw attest init` has been run, every session — one-shot, REPL, or TUI — writes a signed sidecar automatically.
 
 ---
@@ -258,7 +279,7 @@ src/
 │   ├── runtime.ts        SessionAttestor — UI-agnostic wrapper
 │   └── index.ts          facade re-exporting from openai-claw-verify
 ├── tools/                Read, Write, Edit, Bash (fg+bg), Grep, Glob, LS,
-│                         WebFetch, WebSearch, Task, TodoWrite, SemanticSearch
+│                         WebFetch, WebSearch, Task, TodoWrite, Semantic
 ├── permissions/          ask/allow/deny + interactive prompt
 ├── memory/               listMemories/writeMemory + compaction.ts
 ├── hooks/                shell hooks driven by settings.json
@@ -287,9 +308,10 @@ packages/openai-claw-verify/   audit-side verifier (separately published)
 
 | Version | Theme | Highlights |
 |---|---|---|
-| **0.5.0** | Auditor Experience | `claw audit verify`, `claw identity`, reproducible demo fixtures, this README |
-| 0.6.0 | Automation | auto-anchor batching, anchor-on-save, retry queue, configurable calendars |
-| 0.7.0 | SmartLedger Interop | GDAF envelope wrapping, ChainSimple alternate anchor, Legal Token Protocol metadata, optional BSV publication |
+| 0.5.0 | Auditor Experience | `claw audit verify`, `claw identity`, reproducible demo fixtures |
+| **0.6.0** | MCP Attestation | per-MCP-tool provenance (`mcp_attach`, `mcp_tool_offered`, `mcpProvenance`) signed into the Merkle tree; strict-mode tool schemas + dispatch-layer arg validation |
+| 0.7.0 | Automation | auto-anchor batching, anchor-on-save, retry queue, configurable calendars |
+| 0.8.0 | SmartLedger Interop | GDAF envelope wrapping, ChainSimple alternate anchor, Legal Token Protocol metadata, optional BSV publication |
 
 ---
 
