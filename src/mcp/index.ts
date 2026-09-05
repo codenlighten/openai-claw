@@ -6,7 +6,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { ClawConfig } from "../config.js";
 import { type Tool, ok, err } from "../tools/types.js";
-import { computeFingerprint, type McpFingerprint } from "./fingerprint.js";
+import { computeFingerprint, buildServerEnv, type McpFingerprint } from "./fingerprint.js";
 
 export interface McpStdioConfig {
   type?: "stdio";
@@ -24,9 +24,13 @@ export interface McpHttpConfig {
 
 export type McpServerConfig = McpStdioConfig | McpHttpConfig;
 
+export type McpScope = "user" | "project";
+
 export interface McpServerSpec {
   name: string;
   config: McpServerConfig;
+  /** Which settings file declared this server. Drives the consent record. */
+  scope: McpScope;
 }
 
 interface ConnectedServer {
@@ -39,6 +43,8 @@ interface ConnectedServer {
   fingerprint: McpFingerprint;
   /** Per-tool schema fingerprints (v0.6.0+). One entry per tool offered. */
   toolOfferings: McpToolOffering[];
+  /** Which settings file declared this server. */
+  scope: McpScope;
 }
 
 export interface McpToolOffering {
@@ -70,7 +76,11 @@ export function loadMcpServerSpecs(
     ...(user.mcpServers ?? {}),
     ...(proj.mcpServers ?? {}),
   };
-  return Object.entries(merged).map(([name, cfg]) => ({ name, config: cfg }));
+  return Object.entries(merged).map(([name, cfg]) => ({
+    name,
+    config: cfg,
+    scope: projNames.includes(name) ? ("project" as const) : ("user" as const),
+  }));
 }
 
 export async function startMcpServers(specs: McpServerSpec[]): Promise<Tool[]> {
@@ -104,7 +114,7 @@ async function connectOne(spec: McpServerSpec): Promise<ConnectedServer> {
       : new StdioClientTransport({
           command: spec.config.command,
           args: spec.config.args ?? [],
-          env: { ...process.env, ...(spec.config.env ?? {}) } as Record<string, string>,
+          env: buildServerEnv(spec.config.env),
           cwd: spec.config.cwd,
         });
   const client = new Client({ name: "openai-claw", version: "0.1.0" }, { capabilities: {} });
@@ -163,7 +173,7 @@ async function connectOne(spec: McpServerSpec): Promise<ConnectedServer> {
     }
   }
 
-  return { name: spec.name, client, tools, resources, prompts, fingerprint, toolOfferings };
+  return { name: spec.name, client, tools, resources, prompts, fingerprint, toolOfferings, scope: spec.scope };
 }
 
 /**
@@ -176,11 +186,13 @@ export function getConnectedServers(): Array<{
   name: string;
   fingerprint: McpFingerprint;
   toolOfferings: McpToolOffering[];
+  scope: McpScope;
 }> {
   return connected.map((c) => ({
     name: c.name,
     fingerprint: c.fingerprint,
     toolOfferings: c.toolOfferings,
+    scope: c.scope,
   }));
 }
 
