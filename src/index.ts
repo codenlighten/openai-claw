@@ -117,7 +117,7 @@ async function main() {
     config,
     tools,
     permissionCheck: (tool, input, meta) => permissions.check(tool, input, meta),
-    spawnSubagent: (req) => runSubagent(config, (t, i, m) => permissions.check(t, i, m), req),
+    spawnSubagent: (req, signal) => runSubagent(config, (t, i, m) => permissions.check(t, i, m), req, undefined, signal),
     runHook: (event, payload) => hookRunner.run(event, payload),
     systemPromptExtras,
   });

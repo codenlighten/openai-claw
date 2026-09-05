@@ -10,7 +10,7 @@ export interface ToolContext {
     meta?: PermissionMeta
   ) => Promise<PermissionDecision>;
   // For subagents to spawn child agents.
-  spawnSubagent?: (opts: SubagentRequest) => Promise<string>;
+  spawnSubagent?: (opts: SubagentRequest, abortSignal?: AbortSignal) => Promise<string>;
   // For long-running tools to stream progress lines back to the UI.
   onProgress?: (chunk: string) => void;
   // Identifies the in-flight tool call so the UI can route progress events.

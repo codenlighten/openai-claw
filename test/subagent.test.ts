@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
-import { redactSensitiveHunks, collectWorktreeDiff, countCommitsSince } from "../src/subagent.js";
+import { redactSensitiveHunks, collectWorktreeDiff, countCommitsSince, runSubagent } from "../src/subagent.js";
+import { buildTaskTool } from "../src/tools/task.js";
 
 describe("subagent worktree diff redaction", () => {
   const benign = `diff --git a/src/foo.ts b/src/foo.ts
@@ -112,5 +113,63 @@ describe("subagent worktree diff collection", () => {
   it("reports nothing for an untouched worktree", () => {
     expect(collectWorktreeDiff(worktree, base).trim()).toBe("");
     expect(countCommitsSince(worktree, base)).toBe(0);
+  });
+});
+
+describe("abort propagation into subagents", () => {
+  const cfg = () =>
+    ({
+      workdir: os.tmpdir(),
+      homeDir: os.tmpdir(),
+      projectDir: os.tmpdir(),
+      memoryDir: os.tmpdir(),
+      model: "test",
+      apiKey: "x",
+      allowedTools: [],
+      deniedTools: [],
+      contextWindow: 0,
+      compactThreshold: 1,
+      permissionMode: "bypassPermissions",
+      maxTurns: 50,
+      maxToolResultChars: 50_000,
+      models: {},
+    }) as any;
+
+  const ctxFor = (over: any = {}) => ({
+    config: cfg(),
+    permissionCheck: async () => ({ allow: true }),
+    ...over,
+  });
+
+  it("Task hands the caller's signal to spawnSubagent", async () => {
+    // Without this the parent's abort — Ctrl-C, or an eval's per-case timeout —
+    // could not reach a subagent once the Task had been dispatched.
+    const controller = new AbortController();
+    let seen: AbortSignal | undefined;
+    const tool = buildTaskTool(cfg());
+    await tool.run(
+      { description: "d", prompt: "p" },
+      ctxFor({
+        abortSignal: controller.signal,
+        spawnSubagent: async (_req: any, signal?: AbortSignal) => {
+          seen = signal;
+          return "done";
+        },
+      })
+    );
+    expect(seen).toBe(controller.signal);
+  });
+
+  it("runSubagent refuses to start when already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runSubagent(
+      cfg(),
+      async () => ({ allow: true }),
+      { description: "d", prompt: "p" },
+      undefined,
+      controller.signal
+    );
+    expect(result).toContain("aborted");
   });
 });

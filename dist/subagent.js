@@ -10,7 +10,9 @@ import { findSubagent } from "./subagents/index.js";
  * config + permission manager. Their result is a single text string returned to
  * the parent's Task tool call.
  */
-export async function runSubagent(config, permissionCheck, req, onStatus) {
+export async function runSubagent(config, permissionCheck, req, onStatus, abortSignal) {
+    if (abortSignal?.aborted)
+        return "Subagent not started: aborted.";
     const kind = req.subagent_type ?? "general-purpose";
     const def = findSubagent(config, kind);
     // Pick the tool set. Order of resolution:
@@ -71,13 +73,16 @@ export async function runSubagent(config, permissionCheck, req, onStatus) {
     agent.pushUser(req.prompt);
     let result = "";
     onStatus?.(`[subagent:${kind}] ${req.description}`);
+    // Without the signal a subagent runs to its own turn limit no matter what
+    // the caller does: Ctrl-C, or an eval's per-case timeout, could not stop a
+    // Task once it had been dispatched.
     await agent.run((evt) => {
         if (evt.type === "text")
             result = evt.data;
         if (evt.type === "error") {
             result = `Subagent error: ${evt.data}`;
         }
-    });
+    }, abortSignal);
     if (worktreePath) {
         const rawDiff = collectWorktreeDiff(worktreePath, baseCommit);
         const commits = countCommitsSince(worktreePath, baseCommit);

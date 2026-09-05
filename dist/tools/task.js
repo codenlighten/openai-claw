@@ -42,7 +42,7 @@ export function buildTaskTool(config) {
                     prompt: input.prompt,
                     subagent_type: input.subagent_type,
                     isolation: input.isolation,
-                });
+                }, ctx.abortSignal);
                 return ok(result);
             }
             catch (e) {
@@ -79,7 +79,7 @@ export const taskTool = {
                 description: input.description,
                 prompt: input.prompt,
                 subagent_type: input.subagent_type,
-            });
+            }, ctx.abortSignal);
             return ok(result);
         }
         catch (e) {

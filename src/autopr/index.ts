@@ -110,7 +110,7 @@ export async function runAutoPr(
     config: runConfig,
     tools,
     permissionCheck: (t, i, m) => permissions.check(t, i, m),
-    spawnSubagent: (req) => runSubagent(runConfig, (t, i, m) => permissions.check(t, i, m), req),
+    spawnSubagent: (req, signal) => runSubagent(runConfig, (t, i, m) => permissions.check(t, i, m), req, undefined, signal),
     runHook: (event, payload) => hookRunner.run(event, payload),
   });
 

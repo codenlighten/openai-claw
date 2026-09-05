@@ -276,7 +276,7 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
       config,
       tools,
       permissionCheck: (t, i, m) => permissions.check(t, i, m),
-      spawnSubagent: (req) => runSubagent(config, (t, i, m) => permissions.check(t, i, m), req),
+      spawnSubagent: (req, signal) => runSubagent(config, (t, i, m) => permissions.check(t, i, m), req, undefined, signal),
     });
     agent.pushUser(c.prompt);
     const timeoutMs = c.timeoutMs ?? DEFAULT_CASE_TIMEOUT_MS;

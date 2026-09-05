@@ -17,8 +17,10 @@ export async function runSubagent(
   config: ClawConfig,
   permissionCheck: ToolContext["permissionCheck"],
   req: SubagentRequest,
-  onStatus?: (event: string) => void
+  onStatus?: (event: string) => void,
+  abortSignal?: AbortSignal
 ): Promise<string> {
+  if (abortSignal?.aborted) return "Subagent not started: aborted.";
   const kind = req.subagent_type ?? "general-purpose";
   const def = findSubagent(config, kind);
 
@@ -80,12 +82,15 @@ export async function runSubagent(
 
   let result = "";
   onStatus?.(`[subagent:${kind}] ${req.description}`);
+  // Without the signal a subagent runs to its own turn limit no matter what
+  // the caller does: Ctrl-C, or an eval's per-case timeout, could not stop a
+  // Task once it had been dispatched.
   await agent.run((evt) => {
     if (evt.type === "text") result = evt.data as string;
     if (evt.type === "error") {
       result = `Subagent error: ${evt.data}`;
     }
-  });
+  }, abortSignal);
 
   if (worktreePath) {
     const rawDiff = collectWorktreeDiff(worktreePath, baseCommit);

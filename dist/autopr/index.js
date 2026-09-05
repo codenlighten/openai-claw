@@ -83,7 +83,7 @@ export async function runAutoPr(config, task, opts = {}) {
         config: runConfig,
         tools,
         permissionCheck: (t, i, m) => permissions.check(t, i, m),
-        spawnSubagent: (req) => runSubagent(runConfig, (t, i, m) => permissions.check(t, i, m), req),
+        spawnSubagent: (req, signal) => runSubagent(runConfig, (t, i, m) => permissions.check(t, i, m), req, undefined, signal),
         runHook: (event, payload) => hookRunner.run(event, payload),
     });
     // An agent-authored PR is exactly the artifact this project exists to make
