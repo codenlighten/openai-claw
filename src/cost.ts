@@ -10,30 +10,37 @@ import type { ClawConfig } from "./config.js";
 export interface ModelPrice {
   inputUSDPerMtok: number;
   outputUSDPerMtok: number;
+  /** Cached-prompt-token rate. Omitted → half the input rate. */
+  cachedUSDPerMtok?: number;
 }
 
 export const MODEL_PRICES: Record<string, ModelPrice> = {
-  "gpt-5": { inputUSDPerMtok: 1.25, outputUSDPerMtok: 10.0 },
-  "gpt-5-mini": { inputUSDPerMtok: 0.25, outputUSDPerMtok: 2.0 },
-  "gpt-5-nano": { inputUSDPerMtok: 0.05, outputUSDPerMtok: 0.4 },
+  "gpt-5": { inputUSDPerMtok: 1.25, outputUSDPerMtok: 10.0, cachedUSDPerMtok: 0.125 },
+  "gpt-5-mini": { inputUSDPerMtok: 0.25, outputUSDPerMtok: 2.0, cachedUSDPerMtok: 0.025 },
+  "gpt-5-nano": { inputUSDPerMtok: 0.05, outputUSDPerMtok: 0.4, cachedUSDPerMtok: 0.005 },
   "gpt-4o": { inputUSDPerMtok: 2.5, outputUSDPerMtok: 10.0 },
   "gpt-4o-mini": { inputUSDPerMtok: 0.15, outputUSDPerMtok: 0.6 },
   "o4-mini": { inputUSDPerMtok: 1.1, outputUSDPerMtok: 4.4 },
 };
 
+/**
+ * Exact id first, then the LONGEST matching family prefix. Longest wins because
+ * dated ids are supersets of their family: "gpt-5-nano-2025-08-07" starts with
+ * both "gpt-5" and "gpt-5-nano", and picking the shorter one prices nano at
+ * flagship rates (25x too high).
+ */
 export function priceFor(model: string): ModelPrice | undefined {
   if (MODEL_PRICES[model]) return MODEL_PRICES[model];
-  // Fallback by family prefix.
-  for (const [key, price] of Object.entries(MODEL_PRICES)) {
-    if (model.startsWith(key + "-") || model.startsWith(key)) return price;
-  }
-  return undefined;
+  const keys = Object.keys(MODEL_PRICES)
+    .filter((key) => model.startsWith(key + "-") || model.startsWith(key))
+    .sort((a, b) => b.length - a.length);
+  return keys.length > 0 ? MODEL_PRICES[keys[0]] : undefined;
 }
 
 /**
- * OpenAI bills cached prompt tokens at half the input rate. If we know how many
- * of the prompt_tokens were served from cache, charge them at the discount rate
- * and the rest at full price.
+ * `prompt_tokens` from the API is inclusive of `cached_tokens`, so the uncached
+ * remainder is billed at the input rate and the cached portion at the model's
+ * cached rate (defaulting to half input when the table doesn't say).
  */
 export function computeCostUSD(
   model: string,
@@ -44,9 +51,10 @@ export function computeCostUSD(
   const p = priceFor(model);
   if (!p) return 0;
   const uncached = Math.max(0, promptTokens - cachedTokens);
+  const cachedRate = p.cachedUSDPerMtok ?? p.inputUSDPerMtok * 0.5;
   return (
     (uncached / 1_000_000) * p.inputUSDPerMtok +
-    (cachedTokens / 1_000_000) * p.inputUSDPerMtok * 0.5 +
+    (cachedTokens / 1_000_000) * cachedRate +
     (completionTokens / 1_000_000) * p.outputUSDPerMtok
   );
 }

@@ -23,6 +23,14 @@ describe("cost", () => {
     expect(priceFor("gpt-4o-2024-08-06")).toBeTruthy();
   });
 
+  it("prefers the longest matching family prefix", () => {
+    // "gpt-5-nano-2025-08-07" starts with both "gpt-5" and "gpt-5-nano";
+    // matching the short one prices nano at flagship rates.
+    expect(priceFor("gpt-5-nano-2025-08-07")).toEqual(priceFor("gpt-5-nano"));
+    expect(priceFor("gpt-5-mini-2025-08-07")).toEqual(priceFor("gpt-5-mini"));
+    expect(priceFor("gpt-5-2025-08-07")).toEqual(priceFor("gpt-5"));
+  });
+
   it("returns undefined for unknown models", () => {
     expect(priceFor("not-a-real-model")).toBeUndefined();
   });
@@ -35,9 +43,20 @@ describe("cost", () => {
     expect(computeCostUSD("mystery", 1_000_000, 1_000_000)).toBe(0);
   });
 
-  it("discounts cached prompt tokens at 50%", () => {
-    // gpt-5-nano: $0.05/Mtok input → 1M cached = $0.025; 0M output cost
-    expect(computeCostUSD("gpt-5-nano", 1_000_000, 0, 1_000_000)).toBeCloseTo(0.025, 4);
+  it("bills cached prompt tokens at the model's cached rate", () => {
+    // gpt-5-nano publishes $0.005/Mtok cached against $0.05/Mtok input.
+    expect(computeCostUSD("gpt-5-nano", 1_000_000, 0, 1_000_000)).toBeCloseTo(0.005, 5);
+  });
+
+  it("falls back to half the input rate when no cached rate is published", () => {
+    // gpt-4o: $2.50/Mtok input, no cachedUSDPerMtok in the table → $1.25.
+    expect(computeCostUSD("gpt-4o", 1_000_000, 0, 1_000_000)).toBeCloseTo(1.25, 4);
+  });
+
+  it("does not double-charge cached tokens (prompt_tokens is inclusive)", () => {
+    const allCached = computeCostUSD("gpt-5-nano", 1_000_000, 0, 1_000_000);
+    const noneCached = computeCostUSD("gpt-5-nano", 1_000_000, 0, 0);
+    expect(allCached).toBeLessThan(noneCached);
   });
 });
 
