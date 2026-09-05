@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -15,6 +15,12 @@ beforeAll(() => {
   ]));
   fs.mkdirSync(path.join(tmp, "subdir"));
   fs.writeFileSync(path.join(tmp, "subdir", "a.txt"), "a");
+});
+
+// Every other suite cleans up after itself; this one left a directory in
+// /tmp per test run.
+afterAll(() => {
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 function cfg(): ClawConfig {
