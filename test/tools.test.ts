@@ -5,6 +5,7 @@ import os from "node:os";
 import { readTool } from "../src/tools/read.js";
 import { writeTool } from "../src/tools/write.js";
 import { editTool } from "../src/tools/edit.js";
+import { bashTool } from "../src/tools/bash.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 let tmp: string;
@@ -123,6 +124,30 @@ describe("Edit", () => {
     expect(r.isError).toBeFalsy();
     // CRLF preserved on disk.
     expect(fs.readFileSync(p, "utf8")).toBe("alpha\r\nBETA\r\ngamma\r\n");
+  });
+});
+
+describe("Bash", () => {
+  it("returns an error instead of crashing when the shell cannot spawn", async () => {
+    // An unspawnable child emits "error"; with no listener Node rethrows it as
+    // an uncaught exception and takes the whole CLI down.
+    const badCtx = { ...ctx(), config: { ...ctx().config, workdir: path.join(tmp, "gone") } };
+    const res = await bashTool.run({ command: "echo hi" }, badCtx);
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("Failed to start command");
+  });
+
+  it("runs a command and reports the exit code", async () => {
+    const res = await bashTool.run({ command: "echo hello" }, ctx());
+    expect(res.isError).toBeFalsy();
+    expect(res.content).toContain("hello");
+    expect(res.content).toContain("[exit code: 0]");
+  });
+
+  it("flags a non-zero exit", async () => {
+    const res = await bashTool.run({ command: "exit 3" }, ctx());
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("[exit code: 3]");
   });
 });
 
