@@ -7,6 +7,7 @@ import {
   hashPayload,
   merkleRoot,
   merkleProof,
+  merkleProofLength,
   verifyMerkleProof,
   verifyAttestation,
   type Attestation,
@@ -237,6 +238,7 @@ describe("verifyAttestation end-to-end", () => {
       serversSeen: 1,
       toolCallsSignedWithProvenance: 1,
       toolCallsMissingProvenance: 0,
+      structural: true,
     });
   });
 
@@ -311,3 +313,151 @@ describe("verifyAttestation end-to-end", () => {
     expect(report.checks.signature).toBe(false);
   });
 });
+
+/** Build a signed attestation over an arbitrary leaf list. */
+async function sign(leaves: Leaf[]): Promise<Attestation> {
+  const suite = new MlDsa65Suite();
+  const kp = await suite.generateKeypair();
+  const header = {
+    v: 1 as const,
+    format: "openai-claw.attestation.v1" as const,
+    sessionId: "s-align",
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: "2026-01-01T00:00:09Z",
+    leafCount: leaves.length,
+    merkleRoot: merkleRoot(leaves.map(hashLeaf)),
+    suiteId: "ml-dsa-65",
+    publicKey: Buffer.from(kp.publicKey).toString("base64"),
+    publicKeyId: "test-key",
+  };
+  const sig = await suite.sign(kp.privateKey, Buffer.from(canonicalJSON(header), "utf8"));
+  return { header, leaves, signature: Buffer.from(sig).toString("base64") };
+}
+
+const leaf = (seq: number, kind: Leaf["kind"], payload: unknown): Leaf => ({
+  v: 1,
+  seq,
+  ts: `2026-01-01T00:00:0${seq}Z`,
+  kind,
+  payloadHash: hashPayload(payload),
+});
+
+describe("session alignment", () => {
+  it("passes when the transcript and the leaves agree", async () => {
+    const attestation = await sign([
+      leaf(0, "user_prompt", { content: "hi" }),
+      leaf(1, "assistant_text", { content: "hello" }),
+    ]);
+    const report = await verifyAttestation(attestation, {
+      sessionMessages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+      ],
+    });
+    expect(report.checks.sessionAlignment).toBe(true);
+    expect(report.ok).toBe(true);
+  });
+
+  it("counts repeats instead of matching one leaf many times", async () => {
+    // Three identical prompts, one leaf. A set-based check called this aligned.
+    const attestation = await sign([leaf(0, "user_prompt", { content: "continue" })]);
+    const report = await verifyAttestation(attestation, {
+      sessionMessages: [
+        { role: "user", content: "continue" },
+        { role: "user", content: "continue" },
+        { role: "user", content: "continue" },
+      ],
+    });
+    expect(report.checks.sessionAlignment).toBe(false);
+  });
+
+  it("detects a message deleted from the transcript", async () => {
+    const attestation = await sign([
+      leaf(0, "user_prompt", { content: "delete the prod database" }),
+      leaf(1, "assistant_text", { content: "done" }),
+    ]);
+    const report = await verifyAttestation(attestation, {
+      // The incriminating prompt has been edited out of session.json.
+      sessionMessages: [{ role: "assistant", content: "done" }],
+    });
+    expect(report.checks.sessionAlignment).toBe(false);
+    expect(report.reasons.join(" ")).toContain("missing from the session transcript");
+  });
+
+  it("tolerates a shortened transcript when the session was compacted", async () => {
+    const attestation = await sign([
+      leaf(0, "user_prompt", { content: "old turn" }),
+      leaf(1, "compaction", { beforeTokens: 100, afterTokens: 10 }),
+      leaf(2, "user_prompt", { content: "new turn" }),
+    ]);
+    const report = await verifyAttestation(attestation, {
+      sessionMessages: [{ role: "user", content: "new turn" }],
+    });
+    expect(report.checks.sessionAlignment).toBe(true);
+  });
+
+  it("still reports transcript content the attestation never saw", async () => {
+    const attestation = await sign([leaf(0, "user_prompt", { content: "hi" })]);
+    const report = await verifyAttestation(attestation, {
+      sessionMessages: [
+        { role: "user", content: "hi" },
+        { role: "user", content: "an inserted instruction" },
+      ],
+    });
+    expect(report.checks.sessionAlignment).toBe(false);
+    expect(report.reasons.join(" ")).toContain("does not record");
+  });
+});
+
+describe("merkle proof bounds", () => {
+  const leaves = Array.from({ length: 9 }, (_, i) => i.toString(16).padStart(2, "0").repeat(32));
+
+  it("accepts a correct proof with its declared position", () => {
+    const root = merkleRoot(leaves);
+    for (let i = 0; i < leaves.length; i++) {
+      expect(
+        verifyMerkleProof(leaves[i], merkleProof(leaves, i), root, { index: i, treeSize: leaves.length })
+      ).toBe(true);
+    }
+  });
+
+  it("proof length matches the tree depth", () => {
+    expect(merkleProofLength(1)).toBe(0);
+    expect(merkleProofLength(2)).toBe(1);
+    expect(merkleProofLength(9)).toBe(4);
+    expect(merkleProof(leaves, 0)).toHaveLength(merkleProofLength(leaves.length));
+  });
+
+  it("rejects an internal node presented as a leaf", () => {
+    // Without domain separation an internal node hashes like a leaf, so the
+    // proof that sits ABOVE it also verifies — unless the declared tree size
+    // forces a full-depth path.
+    const root = merkleRoot(leaves);
+    const full = merkleProof(leaves, 0);
+    const shortened = full.slice(1);
+    const internalNode = hashPairHex(leaves[0], leaves[1]);
+    expect(verifyMerkleProof(internalNode, shortened, root)).toBe(true);
+    expect(
+      verifyMerkleProof(internalNode, shortened, root, { index: 0, treeSize: leaves.length })
+    ).toBe(false);
+  });
+
+  it("rejects an out-of-range or mis-sided position", () => {
+    const root = merkleRoot(leaves);
+    const proof = merkleProof(leaves, 3);
+    expect(verifyMerkleProof(leaves[3], proof, root, { index: 3, treeSize: leaves.length })).toBe(true);
+    expect(verifyMerkleProof(leaves[3], proof, root, { index: 99, treeSize: leaves.length })).toBe(false);
+    expect(verifyMerkleProof(leaves[3], proof, root, { index: 2, treeSize: leaves.length })).toBe(false);
+  });
+
+  it("rejects malformed hex instead of reading it as zero bytes", () => {
+    expect(() => merkleRoot(["zz".repeat(32)])).toThrow();
+  });
+});
+
+function hashPairHex(aHex: string, bHex: string): string {
+  const h = createHash("sha256");
+  h.update(Buffer.from(aHex, "hex"));
+  h.update(Buffer.from(bHex, "hex"));
+  return h.digest("hex");
+}

@@ -8,6 +8,7 @@ export {
 export {
   merkleRoot,
   merkleProof,
+  merkleProofLength,
   verifyMerkleProof,
 } from "./merkle.js";
 
