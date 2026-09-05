@@ -48,7 +48,11 @@ For independent verification with no claw runtime:
 ```bash
 npm install @smartledger.technology/openai-claw-verify   # ~11 kB
 # then call verifyAttestation() against any sidecar
-ots verify proofs/*.ots                              # standard Python OTS tool
+
+# For the Bitcoin side, use the standard client. The timestamped message is the
+# canonical JSON of the signed header, which never exists as a file — so pass
+# the digest (it is `anchor.digest` in the sidecar) rather than a target file:
+ots verify -d $(jq -r .anchor.digest <session-id>.attest.json) proofs/<session-id>.alice.ots
 ```
 
 ---
@@ -70,7 +74,7 @@ This honesty is what makes the project defensible:
 2. **The user intended every action the AI took.** Verification proves what happened, not what was wanted.
 3. **The terminal environment was clean.** If the local machine was compromised at the time of the session, the attestor could have been fed false data — the signature would still verify.
 4. **The model was honest internally.** Verification covers the I/O boundary. It says nothing about model alignment, hallucination, or intent.
-5. **Bitcoin block confirmation, immediately.** Initial OTS proofs are pending — they become Bitcoin-confirmed after the calendars' daily merge (~3 hours). Run `ots upgrade` after that to fetch the upgraded proof, then `ots verify`.
+5. **Bitcoin block confirmation, immediately.** Initial OTS proofs are pending — they become Bitcoin-confirmed after the calendars' daily merge (~3 hours). Run `ots upgrade <file>.ots` after that to fetch the completed proof, then `ots verify -d <digest> <file>.ots`. Confirming the block itself needs a Bitcoin node; `claw attest export-ots` prints the exact commands with the digest filled in.
 6. **That an MCP tool call's provenance leaves describe *that* call.** Leaves store payload *hashes*, so the verifier cannot read them: it confirms an `mcp_attach`, an `mcp_tool_offered` and a `permission_decision` precede each MCP call, but not that they refer to the same server and tool, nor that the consent was granted rather than refused. Binding them by content requires `session.json` to record MCP events too — tracked for a follow-up.
 7. **Anything about the transcript, unless you supply it.** The signature covers leaf hashes, not session text. `claw audit verify` only reports `sessionAlignment` when the matching `session.json` is present; without it, a verified sidecar says a session of that shape occurred, not what was in it.
 

@@ -30,7 +30,7 @@
 #   - That the user intended every action the AI took.
 #   - That the local machine was uncompromised when the session ran.
 #   - That the Bitcoin block has confirmed yet (run `ots upgrade`
-#     and `ots verify` after ~3 hours to chase the chain anchor).
+#     and `ots verify -d <digest>` after ~3 hours to chase the chain anchor).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -85,6 +85,10 @@ else
   dim    "    python3 -m venv /tmp/ots-venv && /tmp/ots-venv/bin/pip install opentimestamps-client"
   exit 0
 fi
+DIGEST=$(node -e "
+const a = require('./sample-session.attest.json');
+process.stdout.write(a.anchor.digest);
+")
 for f in proofs/sample-session.alice.ots proofs/sample-session.bob.ots proofs/sample-session.finney.ots; do
   echo
   cyan "  $f"
@@ -92,8 +96,18 @@ for f in proofs/sample-session.alice.ots proofs/sample-session.bob.ots proofs/sa
 done
 
 echo
+cyan "== step 4: verify each proof against the attested digest"
+dim "  The timestamped message is the canonical JSON of the signed header, which"
+dim "  never exists as a file — so 'ots verify' needs -d, not a target filename."
+for f in proofs/sample-session.alice.ots proofs/sample-session.bob.ots proofs/sample-session.finney.ots; do
+  echo
+  cyan "  ots verify -d $DIGEST $f"
+  "$OTS_BIN" verify -d "$DIGEST" "$f" 2>&1 | sed 's/^/    /'
+done
+
+echo
 green "== summary =="
 echo "  Claw-side cryptography:    verified independently by openai-claw-verify"
-echo "  OpenTimestamps proof:      well-formed, pending Bitcoin confirmation"
-echo "  Run 'ots upgrade proofs/*.ots' then 'ots verify proofs/*.ots' in ~3 hours"
-echo "  to chase the chain anchor."
+echo "  OpenTimestamps proof:      well-formed, attested by the calendars"
+echo "  Reading the Bitcoin block back out needs a local node; without one the"
+echo "  client reports the attestation and stops there."

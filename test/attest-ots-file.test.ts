@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import {
   buildOtsFile,
   exportOtsFiles,
@@ -84,5 +86,54 @@ describe("exportOtsFiles", () => {
     for (const e of out) {
       expect(e.bytes.toString("hex").startsWith(HEADER_HEX)).toBe(true);
     }
+  });
+});
+
+describe("digest binding", () => {
+  // The whole audit chain hangs on this: the digest embedded in every .ots
+  // file must be the one that was signed, or the timestamp proves nothing
+  // about this attestation. `ots verify -d <digest>` is how an auditor checks
+  // it, so the bytes at that offset are load-bearing.
+  const DIGEST_OFFSET = 31 + 1 + 1; // magic + version + file-hash op
+
+  it("embeds the anchored digest at the spec offset in every exported file", () => {
+    const digest = "9016c1a763c824acde2337915d1341a8cd68feb0c4f3965dd068c816e2b25edd";
+    const anchor = {
+      type: "opentimestamps-pending" as const,
+      digest,
+      submittedAt: "2026-01-01T00:00:00Z",
+      calendars: [
+        { url: "https://alice.btc.calendar.opentimestamps.org", ok: true, response: Buffer.from("aaaa").toString("base64") },
+        { url: "https://bob.btc.calendar.opentimestamps.org", ok: true, response: Buffer.from("bbbb").toString("base64") },
+      ],
+    };
+    const exports = exportOtsFiles(anchor);
+    expect(exports).toHaveLength(2);
+    for (const e of exports) {
+      const embedded = e.bytes.subarray(DIGEST_OFFSET, DIGEST_OFFSET + 32).toString("hex");
+      expect(embedded).toBe(digest);
+    }
+  });
+
+  it("the committed demo proofs carry the digest their sidecar anchored", () => {
+    const attestation = JSON.parse(
+      fs.readFileSync(path.join(process.cwd(), "examples/audit-demo/sample-session.attest.json"), "utf8")
+    );
+    const proofsDir = path.join(process.cwd(), "examples/audit-demo/proofs");
+    const files = fs.readdirSync(proofsDir).filter((f) => f.endsWith(".ots"));
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      const bytes = fs.readFileSync(path.join(proofsDir, f));
+      const embedded = bytes.subarray(DIGEST_OFFSET, DIGEST_OFFSET + 32).toString("hex");
+      expect(embedded, `${f} digest`).toBe(attestation.anchor.digest);
+    }
+  });
+
+  it("the anchored digest is sha256 of the signed header's canonical JSON", async () => {
+    const { canonicalJSON, sha256Hex } = await import("@smartledger.technology/openai-claw-verify");
+    const attestation = JSON.parse(
+      fs.readFileSync(path.join(process.cwd(), "examples/audit-demo/sample-session.attest.json"), "utf8")
+    );
+    expect(attestation.anchor.digest).toBe(sha256Hex(canonicalJSON(attestation.header)));
   });
 });

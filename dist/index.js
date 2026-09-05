@@ -366,15 +366,22 @@ async function runExportOts(config, args) {
     const sessionId = args.find((a) => !a.startsWith("--"));
     const outDirArg = args.find((a) => a.startsWith("--out="))?.split("=")[1];
     if (!sessionId) {
-        console.error(chalk.red('usage: claw attest export-ots <session-id> [--out=<dir>]'));
+        console.error(chalk.red('usage: claw attest export-ots <session-id-or-sidecar-path> [--out=<dir>]'));
         process.exit(2);
     }
     const { exportOtsFiles } = await import("./attest/index.js");
-    const sidecar = path.join(config.projectDir, "sessions", `${sessionId}.attest.json`);
+    // Accept a sidecar path as well as a bare session id, the way `audit verify`
+    // does — otherwise a sidecar that lives anywhere but this machine's project
+    // directory (a committed fixture, one handed to an auditor) cannot be
+    // exported at all.
+    const sidecar = sessionId.endsWith(".attest.json") && fs.existsSync(sessionId)
+        ? sessionId
+        : path.join(config.projectDir, "sessions", `${sessionId}.attest.json`);
     if (!fs.existsSync(sidecar)) {
         console.error(chalk.red(`no sidecar at ${sidecar}`));
         process.exit(1);
     }
+    const outName = path.basename(sidecar).replace(/\.attest\.json$/, "");
     const attestation = JSON.parse(fs.readFileSync(sidecar, "utf8"));
     if (!attestation.anchor) {
         console.error(chalk.red("sidecar has no anchor — run `claw attest anchor` first"));
@@ -388,16 +395,28 @@ async function runExportOts(config, args) {
         console.error(chalk.yellow("anchor has no successful calendar responses — nothing to export"));
         process.exit(1);
     }
+    const written = [];
     for (const e of exports) {
-        const file = path.join(outDir, `${sessionId}.${e.shortName}.ots`);
+        const file = path.join(outDir, `${outName}.${e.shortName}.ots`);
         fs.writeFileSync(file, e.bytes);
+        written.push(file);
         console.log(`  ${chalk.green("✓")} ${file}  ${chalk.dim(`(${e.bytes.length} bytes, ${e.url})`)}`);
     }
     console.log("");
-    console.log(chalk.dim("Verify any of these with the standard `ots verify <file>.ots` tool"));
-    console.log(chalk.dim("(install: pip install opentimestamps-client). Pending proofs become"));
-    console.log(chalk.dim("Bitcoin-confirmed automatically within ~3 hours — re-run `ots upgrade`"));
-    console.log(chalk.dim("then `ots verify` to chase the chain anchor."));
+    // The timestamped message is the canonical JSON of the header, which never
+    // exists as a file. Bare `ots verify <file>.ots` therefore fails with
+    // "Could not open target" — it needs the digest passed explicitly.
+    console.log(chalk.bold("Verify with the standard OpenTimestamps client:"));
+    console.log(chalk.dim("  (install: pipx install opentimestamps-client)"));
+    console.log("");
+    for (const file of written) {
+        console.log(`  ots verify -d ${attestation.anchor.digest} ${file}`);
+    }
+    console.log("");
+    console.log(chalk.dim("The digest is sha256 of the canonical JSON of the signed header — there is"));
+    console.log(chalk.dim("no target file to point at, so -d is required. Pending proofs become"));
+    console.log(chalk.dim("Bitcoin-confirmed within ~3 hours; run `ots upgrade <file>.ots` first to"));
+    console.log(chalk.dim("fetch the completed proof. Confirming the block needs a Bitcoin node."));
 }
 async function runAnchor(config, args) {
     const { anchorOpenTimestamps, canonicalJSON, sha256Hex } = await import("./attest/index.js");
@@ -608,8 +627,12 @@ async function runAuditCli(args) {
         }
         if (proofFiles.length > 0) {
             console.log(labelGreen("    ✓ OpenTimestamps proofs are well-formed"));
-            console.log(chalk.dim("      Run `ots upgrade <file>.ots && ots verify <file>.ots` once Bitcoin"));
-            console.log(chalk.dim("      has confirmed the calendar's batch (~3 hours after submission)."));
+            if (attestation.anchor?.digest) {
+                console.log(chalk.dim("      Chase the chain anchor with the standard client — the timestamped"));
+                console.log(chalk.dim("      message is the header's canonical JSON, so -d is required:"));
+                console.log(chalk.dim(`        ots upgrade ${path.join(proofsDir, path.basename(proofFiles[0]))}`));
+                console.log(chalk.dim(`        ots verify -d ${attestation.anchor.digest} ${path.join(proofsDir, path.basename(proofFiles[0]))}`));
+            }
         }
     }
     else {
