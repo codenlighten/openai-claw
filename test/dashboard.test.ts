@@ -3,14 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import http from "node:http";
-import { startDashboard } from "../src/web/index.js";
+import type { AddressInfo } from "node:net";
+import { createDashboardServer } from "../src/web/index.js";
 import { saveSession } from "../src/session.js";
 import { appendCostLog } from "../src/cost.js";
 import type { ClawConfig } from "../src/config.js";
 import type { ChatMessage } from "../src/client.js";
 
 let tmp: string;
-let server: { close: () => Promise<void> } | null;
+let server: http.Server | null;
 let port: number;
 
 const cfg = (): ClawConfig => ({
@@ -44,30 +45,16 @@ function get(p: string): Promise<{ status: number; body: string }> {
 
 beforeEach(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "claw-dashboard-"));
-  // Pick an ephemeral port and override startDashboard's blocking wait.
-  port = 39000 + Math.floor(Math.random() * 1000);
-  // Race startDashboard against a 100ms wait; we never call its blocking promise.
-  const ready = new Promise<void>((resolve) => {
-    const origCreate = http.createServer;
-    const wrapped = (...args: any[]) => {
-      const s = origCreate.apply(http, args as any);
-      const origListen = s.listen.bind(s);
-      (s as any).listen = (p: number, cb?: () => void) =>
-        origListen(p, () => {
-          server = { close: () => new Promise<void>((r) => s.close(() => r())) };
-          cb?.();
-          resolve();
-        });
-      return s;
-    };
-    (http as any).createServer = wrapped;
-    void startDashboard(cfg(), port);
-  });
-  await ready;
+  // Port 0 lets the OS hand us a free port. Picking one at random raced with
+  // whatever else was listening and made this suite flaky.
+  const s = createDashboardServer(cfg());
+  await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", () => resolve()));
+  port = (s.address() as AddressInfo).port;
+  server = s;
 });
 
 afterEach(async () => {
-  if (server) await server.close();
+  if (server) await new Promise<void>((r) => server!.close(() => r()));
   server = null;
   fs.rmSync(tmp, { recursive: true, force: true });
 });

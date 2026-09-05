@@ -107,11 +107,11 @@ describe("resolveProjectTrust", () => {
     expect(isProjectTrusted(cfg())).toBe(false);
   });
 
-  it("handles malformed project settings without throwing", async () => {
+  it("fails closed on malformed project settings", async () => {
     fs.mkdirSync(path.join(work, ".claw"), { recursive: true });
     fs.writeFileSync(path.join(work, ".claw", "settings.json"), "{not json");
     const out = await resolveProjectTrust(cfg(), { interactive: false });
-    // Malformed → treat as no project-level entries (auto-allow).
-    expect(out).toEqual({ trustHooks: true, trustMcp: true });
+    // A trust gate must not grant trust on its own error path.
+    expect(out).toEqual({ trustHooks: false, trustMcp: false });
   });
 });
