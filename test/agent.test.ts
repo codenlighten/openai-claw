@@ -1,4 +1,8 @@
 import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import { writeMemory } from "../src/memory/index.js";
 import { Agent, normalizeNulls, sanitizeMessages, validateToolInput, type AgentClient, type AgentEvent } from "../src/agent.js";
 import { makeStrictSchema } from "../src/client.js";
 import type { CompletionResult, ChatMessage } from "../src/client.js";
@@ -763,5 +767,314 @@ describe("dispatch resilience (hooks must not orphan tool_call_ids)", () => {
     expect(toolMsgs).toHaveLength(1);
     expect((toolMsgs[0] as any).tool_call_id).toBe("c-perm");
     expect(String(toolMsgs[0].content)).toMatch(/Permission denied/);
+  });
+});
+
+describe("truncated completions", () => {
+  it("warns when the model hits the output token limit", async () => {
+    const truncated: CompletionResult = {
+      content: "here is the first half of the answ",
+      tool_calls: [],
+      finish_reason: "length",
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cached_tokens: 0 },
+    };
+    const agent = new Agent({
+      config: cfg({ maxTokens: 64 }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client: new ScriptedClient([truncated]),
+    });
+    agent.pushUser("write something long");
+    const { events, handler } = collect();
+    await agent.run(handler);
+    const warning = events.find((e) => e.type === "warning");
+    expect(warning).toBeTruthy();
+    expect(String(warning!.data)).toContain("cut off");
+    expect(String(warning!.data)).toContain("64");
+  });
+
+  it("reports the finish reason on the done event", async () => {
+    const agent = new Agent({
+      config: cfg(),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client: new ScriptedClient([textOnly("all done")]),
+    });
+    agent.pushUser("hi");
+    const { events, handler } = collect();
+    await agent.run(handler);
+    expect(events.find((e) => e.type === "warning")).toBeUndefined();
+    expect(events.find((e) => e.type === "done")?.data).toEqual({ finishReason: "stop" });
+  });
+});
+
+describe("model role", () => {
+  it("a standing role applies to every turn of a run", async () => {
+    // A subagent declared `modelRole: reasoning` used to get the reasoning model
+    // for its first API call only, then silently drop back to the default.
+    const seen: (string | undefined)[] = [];
+    const client: AgentClient = {
+      async complete(_msgs, _tools, opts) {
+        seen.push(opts?.modelRole);
+        return seen.length < 3
+          ? withToolCalls([{ id: `c${seen.length}`, name: "echo", arguments: {} }])
+          : textOnly("done");
+      },
+    };
+    const agent = new Agent({
+      config: cfg({ models: { default: "x", reasoning: "y" } }),
+      tools: [dummyTool()],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+      modelRole: "reasoning",
+    });
+    agent.pushUser("think hard");
+    const { handler } = collect();
+    await agent.run(handler);
+    expect(seen).toEqual(["reasoning", "reasoning", "reasoning"]);
+  });
+
+  it("a one-shot override wins for one turn, then the standing role resumes", async () => {
+    const seen: (string | undefined)[] = [];
+    const client: AgentClient = {
+      async complete(_msgs, _tools, opts) {
+        seen.push(opts?.modelRole);
+        return textOnly("ok");
+      },
+    };
+    const agent = new Agent({
+      config: cfg({ models: { default: "x", cheap: "z", reasoning: "y" } }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+      modelRole: "cheap",
+    });
+    agent.setNextRole("reasoning");
+    agent.pushUser("a");
+    const { handler } = collect();
+    await agent.run(handler);
+    agent.pushUser("b");
+    await agent.run(handler);
+    expect(seen).toEqual(["reasoning", "cheap"]);
+  });
+});
+
+describe("compaction inputs", () => {
+  const bigTurn = (promptTokens: number): CompletionResult => ({
+    content: "ok",
+    tool_calls: [],
+    finish_reason: "stop",
+    usage: { prompt_tokens: promptTokens, completion_tokens: 5, total_tokens: promptTokens + 5, cached_tokens: 0 },
+  });
+
+  /** A history long enough that compaction has a middle to summarize. */
+  const history = (): ChatMessage[] =>
+    Array.from({ length: 14 }, (_, i) =>
+      i % 2 === 0
+        ? ({ role: "user", content: `turn ${i}` } as ChatMessage)
+        : ({ role: "assistant", content: `reply ${i}` } as ChatMessage)
+    );
+
+  it("compacts on the API's reported prompt_tokens, not the char estimate", async () => {
+    // Short messages: the 4-chars-per-token estimate is nowhere near the limit,
+    // but the API says the real prompt was 3000 tokens against a 4000 window.
+    const client = new ScriptedClient([bigTurn(3000), textOnly("SUMMARY"), textOnly("second")]);
+    const agent = new Agent({
+      config: cfg({ contextWindow: 4000, compactThreshold: 0.5 }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.replaceConversation(history());
+    agent.pushUser("a");
+    const { events, handler } = collect();
+    await agent.run(handler);
+    expect(events.find((e) => e.type === "compaction")).toBeUndefined();
+    agent.pushUser("b");
+    await agent.run(handler);
+    const compaction = events.find((e) => e.type === "compaction");
+    expect(compaction).toBeTruthy();
+    expect(compaction!.data.beforeTokens).toBe(3000);
+  });
+
+  it("does not reuse a stale token count after compacting", async () => {
+    const client = new ScriptedClient([bigTurn(3000), textOnly("SUMMARY"), textOnly("x"), textOnly("y")]);
+    const agent = new Agent({
+      config: cfg({ contextWindow: 4000, compactThreshold: 0.5 }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.replaceConversation(history());
+    agent.pushUser("a");
+    const { events, handler } = collect();
+    await agent.run(handler);
+    agent.pushUser("b");
+    await agent.run(handler);
+    agent.pushUser("c");
+    await agent.run(handler);
+    // Exactly one compaction: the 3000 was consumed, not re-applied every turn.
+    expect(events.filter((e) => e.type === "compaction")).toHaveLength(1);
+  });
+
+  it("keeps the original request and the live todo list through a compaction", async () => {
+    const client = new ScriptedClient([bigTurn(3000), textOnly("SUMMARY"), textOnly("next")]);
+    const agent = new Agent({
+      config: cfg({ contextWindow: 4000, compactThreshold: 0.5 }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    // Both the request and the todo list sit in the region that gets
+    // summarized away, so only pinning can carry them forward.
+    agent.replaceConversation([
+      { role: "user", content: "migrate the billing module to the new API" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "t1", type: "function", function: { name: "TodoWrite", arguments: "{}" } }],
+      } as ChatMessage,
+      {
+        role: "tool",
+        tool_call_id: "t1",
+        name: "TodoWrite",
+        content: "Todos updated:\n[x] 1. read the old client\n[~] 2. port the calls",
+      } as ChatMessage,
+      ...history(),
+    ]);
+    agent.pushUser("a");
+    const { handler } = collect();
+    await agent.run(handler);
+    agent.pushUser("b");
+    await agent.run(handler);
+    const summary = agent.conversation.find(
+      (m) => typeof m.content === "string" && m.content.startsWith("<conversation-summary>")
+    );
+    expect(String(summary?.content)).toContain("migrate the billing module");
+    expect(String(summary?.content)).toContain("port the calls");
+  });
+
+  it("does not start the retained window inside a tool group", async () => {
+    const client = new ScriptedClient([bigTurn(3000), textOnly("SUMMARY"), textOnly("next")]);
+    const agent = new Agent({
+      config: cfg({ contextWindow: 4000, compactThreshold: 0.5 }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    const withToolGroup: ChatMessage[] = [
+      ...history(),
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "a1", type: "function", function: { name: "echo", arguments: "{}" } },
+          { id: "a2", type: "function", function: { name: "echo", arguments: "{}" } },
+        ],
+      } as ChatMessage,
+      { role: "tool", tool_call_id: "a1", name: "echo", content: "first result" } as ChatMessage,
+      { role: "tool", tool_call_id: "a2", name: "echo", content: "second result" } as ChatMessage,
+    ];
+    agent.replaceConversation(withToolGroup);
+    agent.pushUser("a");
+    const { handler } = collect();
+    await agent.run(handler);
+    agent.pushUser("b");
+    await agent.run(handler);
+    // Both results survive: a window starting mid-group would orphan them and
+    // sanitizeMessages would then drop them entirely.
+    const kept = agent.conversation.filter((m) => m.role === "tool").map((m) => m.content);
+    expect(kept).toContain("first result");
+    expect(kept).toContain("second result");
+  });
+});
+
+describe("system prompt lifecycle", () => {
+  it("refreshSystemPrompt picks up memory written mid-session", async () => {
+    const memDir = fs.mkdtempSync(path.join(os.tmpdir(), "claw-sysprompt-"));
+    try {
+      const config = cfg({ memoryDir: memDir });
+      const agent = new Agent({
+        config,
+        tools: [],
+        permissionCheck: async () => ({ allow: true }),
+        client: new ScriptedClient([textOnly("ok")]),
+      });
+      const before = String(agent.conversation[0].content);
+      expect(before).not.toContain("prefers-tabs-over-spaces");
+
+      writeMemory(config, {
+        name: "prefers-tabs-over-spaces",
+        description: "indentation preference",
+        type: "feedback",
+        body: "Use tabs.",
+      });
+      // Nothing changes until the prompt is rebuilt — that was the bug.
+      expect(String(agent.conversation[0].content)).toBe(before);
+
+      agent.refreshSystemPrompt();
+      expect(String(agent.conversation[0].content)).toContain("prefers-tabs-over-spaces");
+      expect(agent.conversation[0].role).toBe("system");
+      expect(agent.conversation).toHaveLength(1);
+    } finally {
+      fs.rmSync(memDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the subagent variant when the prompt is rebuilt", () => {
+    const agent = new Agent({
+      config: cfg(),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      systemPromptVariant: "subagent-explore",
+      client: new ScriptedClient([]),
+    });
+    expect(String(agent.conversation[0].content)).toContain("read-only");
+    agent.refreshSystemPrompt();
+    expect(String(agent.conversation[0].content)).toContain("read-only");
+  });
+});
+
+describe("compaction carries the task statement forward", () => {
+  it("survives a second compaction, including a multi-line request", async () => {
+    const bigTurn = (n: number): CompletionResult => ({
+      content: "ok",
+      tool_calls: [],
+      finish_reason: "stop",
+      usage: { prompt_tokens: n, completion_tokens: 5, total_tokens: n + 5, cached_tokens: 0 },
+    });
+    const filler = (): ChatMessage[] =>
+      Array.from({ length: 14 }, (_, i) =>
+        i % 2 === 0
+          ? ({ role: "user", content: `turn ${i}` } as ChatMessage)
+          : ({ role: "assistant", content: `reply ${i}` } as ChatMessage)
+      );
+    const client = new ScriptedClient([
+      bigTurn(3000),
+      textOnly("SUMMARY ONE"),
+      bigTurn(3000),
+      textOnly("SUMMARY TWO"),
+      textOnly("final"),
+    ]);
+    const agent = new Agent({
+      config: cfg({ contextWindow: 4000, compactThreshold: 0.5 }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.replaceConversation([
+      { role: "user", content: "port the billing module\nto the new API\nand keep the tests green" },
+      ...filler(),
+    ]);
+    const { handler } = collect();
+    for (const p of ["a", "b", "c"]) {
+      agent.pushUser(p);
+      await agent.run(handler);
+    }
+    const summary = agent.conversation.find(
+      (m) => typeof m.content === "string" && m.content.startsWith("<conversation-summary>")
+    );
+    expect(String(summary?.content)).toContain("port the billing module");
+    expect(String(summary?.content)).toContain("keep the tests green");
   });
 });

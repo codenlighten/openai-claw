@@ -209,6 +209,9 @@ export function App({ agent, config, permissions, hooks, sessionAttestor }: AppP
           push({ kind: "system", id: nextId(), text });
           break;
         }
+        case "warning":
+          push({ kind: "system", id: nextId(), text: `! ${evt.data}` });
+          break;
         case "error":
           push({ kind: "error", id: nextId(), text: String(evt.data) });
           break;

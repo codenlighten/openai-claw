@@ -16,6 +16,7 @@ export interface AgentEvent {
     | "tool_result"
     | "usage"
     | "error"
+    | "warning"
     | "compaction"
     | "done";
   data?: any;
@@ -227,6 +228,10 @@ export interface AgentOptions {
   client?: AgentClient;
   /** Optional hook runner. Used to fire PreCompact / SubagentStop / Notification. */
   runHook?: HookCallback;
+  /** Standing model role for every turn. Subagents use this; the default is "default". */
+  modelRole?: ModelRole;
+  /** Which system-prompt variant to build. Subagents pass their own. */
+  systemPromptVariant?: "main" | "subagent-general" | "subagent-explore";
 }
 
 export class Agent {
@@ -238,19 +243,45 @@ export class Agent {
   private totalPromptTokens = 0;
   private totalCompletionTokens = 0;
   private totalCostUSD = 0;
-  /** Override the default model role for the very next turn (consumed once). */
-  private nextModelRole: ModelRole = "default";
+  /**
+   * prompt_tokens the API reported for the most recent request — the exact size
+   * of the conversation as the model saw it. Cleared after a compaction, when
+   * it no longer describes the messages we hold.
+   */
+  private lastPromptTokens: number | undefined;
+  /** Role for every turn of this agent unless a one-shot override is pending. */
+  private modelRole: ModelRole = "default";
+  /** Override for the very next turn only. null when nothing is pending. */
+  private nextModelRole: ModelRole | null = null;
 
   constructor(private opts: AgentOptions) {
     this.client = opts.client ?? new OpenAIClient(opts.config);
     this.toolsByName = new Map(opts.tools.map((t) => [t.name, t]));
+    if (opts.modelRole) this.modelRole = opts.modelRole;
 
-    const sys = buildSystemPrompt({
-      config: opts.config,
-      tools: opts.tools,
-      extras: opts.systemPromptExtras ?? [],
+    this.messages.push({ role: "system", content: this.renderSystemPrompt() });
+  }
+
+  private renderSystemPrompt(): string {
+    return buildSystemPrompt({
+      config: this.opts.config,
+      tools: this.opts.tools,
+      extras: this.opts.systemPromptExtras ?? [],
+      variant: this.opts.systemPromptVariant,
     });
-    this.messages.push({ role: "system", content: sys });
+  }
+
+  /**
+   * Rebuild the system prompt in place. The prompt embeds persistent memory and
+   * project instructions, and it was built once in the constructor — so a
+   * memory saved with /remember did not reach the model until the next restart.
+   * The prompt's stable-prefix-first layout means only the tail changes, so the
+   * provider's prefix cache survives this.
+   */
+  refreshSystemPrompt(): void {
+    const sys = this.renderSystemPrompt();
+    if (this.messages[0]?.role === "system") this.messages[0] = { role: "system", content: sys };
+    else this.messages.unshift({ role: "system", content: sys });
   }
 
   get conversation(): ChatMessage[] {
@@ -279,17 +310,24 @@ export class Agent {
     this.messages.push({ role: "user", content });
   }
 
-  /** Set the role used for the next agent turn. Reset to "default" automatically. */
+  /** Use `role` for the next turn only, then revert to the standing role. */
   setNextRole(role: ModelRole): void {
     this.nextModelRole = role;
   }
 
   /** Force a compaction pass right now, regardless of threshold. Returns [before, after] tokens or null. */
   async forceCompact(): Promise<{ before: number; after: number } | null> {
-    const before = estimateTokens(this.messages);
-    const compacted = await compactIfNeeded(this.messages, this.opts.config, this.client, true);
+    const before = this.lastPromptTokens ?? estimateTokens(this.messages);
+    const compacted = await compactIfNeeded(
+      this.messages,
+      this.opts.config,
+      this.client,
+      true,
+      this.lastPromptTokens
+    );
     if (!compacted) return null;
     this.messages = compacted;
+    this.lastPromptTokens = undefined;
     return { before, after: estimateTokens(this.messages) };
   }
 
@@ -331,7 +369,7 @@ export class Agent {
       turn++;
 
       // Compact context if approaching limit. PreCompact hook may veto.
-      const before = estimateTokens(this.messages);
+      const before = this.lastPromptTokens ?? estimateTokens(this.messages);
       if (this.opts.runHook) {
         const outcomes = await this.opts.runHook("PreCompact", {
           tokens: before,
@@ -342,10 +380,17 @@ export class Agent {
           handler({ type: "compaction", data: { skipped: "blocked by PreCompact hook" } });
         }
       }
-      const compacted = await compactIfNeeded(this.messages, this.opts.config, this.client);
+      const compacted = await compactIfNeeded(
+        this.messages,
+        this.opts.config,
+        this.client,
+        false,
+        this.lastPromptTokens
+      );
       if (compacted) {
         const after = estimateTokens(compacted);
         this.messages = compacted;
+        this.lastPromptTokens = undefined;
         handler({ type: "compaction", data: { beforeTokens: before, afterTokens: after } });
       }
 
@@ -360,8 +405,8 @@ export class Agent {
         );
       }
 
-      const role: ModelRole = this.nextModelRole;
-      this.nextModelRole = "default";
+      const role: ModelRole = this.nextModelRole ?? this.modelRole;
+      this.nextModelRole = null;
       const turnModel = resolveModel(this.opts.config, role);
       let completion;
       try {
@@ -377,6 +422,7 @@ export class Agent {
       }
 
       if (completion.usage) {
+        this.lastPromptTokens = completion.usage.prompt_tokens;
         this.totalTokens += completion.usage.total_tokens;
         this.totalPromptTokens += completion.usage.prompt_tokens;
         this.totalCompletionTokens += completion.usage.completion_tokens;
@@ -418,8 +464,22 @@ export class Agent {
         handler({ type: "text", data: completion.content });
       }
 
+      // finish_reason "length" means the model was cut off mid-output. With no
+      // tool calls the loop would otherwise emit `done` and the truncated text
+      // would read as a finished answer. A truncated tool call is worse: its
+      // arguments fail to parse and the call is dropped, so the turn looks like
+      // a plain text reply.
+      if (completion.finish_reason === "length") {
+        handler({
+          type: "warning",
+          data: `response hit the output token limit and was cut off${
+            this.opts.config.maxTokens ? ` (maxTokens=${this.opts.config.maxTokens})` : ""
+          }. Treat it as incomplete — raise maxTokens or ask for a smaller piece of work.`,
+        });
+      }
+
       if (completion.tool_calls.length === 0) {
-        handler({ type: "done" });
+        handler({ type: "done", data: { finishReason: completion.finish_reason } });
         return;
       }
 
@@ -517,7 +577,7 @@ export class Agent {
     if (tool.needsPermission) {
       let decision: { allow: boolean; reason?: string };
       try {
-        decision = await ctx.permissionCheck(tool.name, parsedInput);
+        decision = await ctx.permissionCheck(tool.name, parsedInput, { mutates: tool.mutates });
       } catch (e: any) {
         decision = { allow: false, reason: `permission check failed: ${e?.message ?? String(e)}` };
       }

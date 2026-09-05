@@ -224,6 +224,9 @@ function makeEventHandler(hooks: HookRunner) {
         }
         break;
       }
+      case "warning":
+        process.stdout.write("\n" + chalk.yellow(`! ${evt.data}`) + "\n");
+        break;
       case "error":
         process.stdout.write("\n" + chalk.red(`error: ${evt.data}`) + "\n");
         break;
