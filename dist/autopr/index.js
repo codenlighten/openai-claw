@@ -42,8 +42,8 @@ export async function runAutoPr(config, task) {
     const agent = new Agent({
         config,
         tools,
-        permissionCheck: (t, i) => permissions.check(t, i),
-        spawnSubagent: (req) => runSubagent(config, (t, i) => permissions.check(t, i), req),
+        permissionCheck: (t, i, m) => permissions.check(t, i, m),
+        spawnSubagent: (req) => runSubagent(config, (t, i, m) => permissions.check(t, i, m), req),
         runHook: (event, payload) => hookRunner.run(event, payload),
     });
     agent.pushUser(`You are running in --auto-pr mode. Complete this task end to end:\n\n${task}\n\nGuidelines:\n` +

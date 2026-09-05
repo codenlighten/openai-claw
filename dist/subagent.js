@@ -3,7 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { Agent } from "./agent.js";
 import { getSubagentTools, getAllTools } from "./tools/index.js";
-import { buildSystemPrompt } from "./prompts/system.js";
+import { createSubagentTodoTool } from "./tools/todo.js";
 import { findSubagent } from "./subagents/index.js";
 /**
  * Spawn a subagent. Subagents have their own conversation but share the parent's
@@ -19,7 +19,11 @@ export async function runSubagent(config, permissionCheck, req, onStatus) {
     //   3. Default to general-purpose tools (everything except Task).
     let tools;
     if (def?.tools) {
-        const all = getAllTools();
+        // Same substitution getSubagentTools makes: a registered subagent that asks
+        // for TodoWrite gets its own list, not the parent's.
+        const all = getAllTools()
+            .filter((t) => t.name !== "TodoWrite")
+            .concat(createSubagentTodoTool());
         tools = all.filter((t) => def.tools.includes(t.name));
     }
     else if (kind === "explore") {
@@ -37,11 +41,11 @@ export async function runSubagent(config, permissionCheck, req, onStatus) {
     if (def && def.body) {
         baseExtras.push(`# Subagent role\n${def.body}`);
     }
-    const systemPrompt = buildSystemPrompt({ config, tools, variant, extras: baseExtras });
     // Worktree isolation: spin up a temp git worktree and run the subagent there.
     let runConfig = config;
     let worktreePath = null;
     let branchName = null;
+    let baseCommit = null;
     if (req.isolation === "worktree") {
         const setup = createWorktree(config, req.description);
         if (!setup.ok)
@@ -49,6 +53,7 @@ export async function runSubagent(config, permissionCheck, req, onStatus) {
         runConfig = { ...config, workdir: setup.path };
         worktreePath = setup.path;
         branchName = setup.branch;
+        baseCommit = setup.base;
         onStatus?.(`[worktree] ${worktreePath}`);
     }
     const agent = new Agent({
@@ -56,12 +61,13 @@ export async function runSubagent(config, permissionCheck, req, onStatus) {
         tools,
         permissionCheck,
         spawnSubagent: undefined,
-        systemPromptExtras: [],
+        systemPromptExtras: baseExtras,
+        systemPromptVariant: variant,
+        // Standing, not one-shot: a "reasoning" subagent that reverted to the
+        // default model after its first API call was silently downgraded for the
+        // rest of its run.
+        modelRole: def?.modelRole,
     });
-    agent.conversation[0] = { role: "system", content: systemPrompt };
-    if (def?.modelRole) {
-        agent.setNextRole(def.modelRole);
-    }
     agent.pushUser(req.prompt);
     let result = "";
     onStatus?.(`[subagent:${kind}] ${req.description}`);
@@ -73,16 +79,20 @@ export async function runSubagent(config, permissionCheck, req, onStatus) {
         }
     });
     if (worktreePath) {
-        const rawDiff = collectWorktreeDiff(worktreePath);
-        if (rawDiff.trim() === "") {
-            // No changes — clean up immediately.
+        const rawDiff = collectWorktreeDiff(worktreePath, baseCommit);
+        const commits = countCommitsSince(worktreePath, baseCommit);
+        if (rawDiff.trim() === "" && commits === 0) {
+            // Nothing to keep. The commit count is checked as well as the diff: a
+            // subagent that commits its work leaves a clean tree, and auto-cleaning
+            // on an empty diff alone force-deleted the branch those commits lived on.
             removeWorktree(config.workdir, worktreePath, branchName);
             result = `${result}\n\n[worktree had no diff — auto-cleaned]`;
         }
         else {
             const { diff: filtered, redacted } = redactSensitiveHunks(rawDiff);
             const { text: shown, dropped } = truncateDiff(filtered, 50_000);
-            const banner = `[worktree retained: ${worktreePath}]\n[branch: ${branchName}]`;
+            const commitNote = commits > 0 ? `\n[${commits} commit(s) on the branch]` : "";
+            const banner = `[worktree retained: ${worktreePath}]\n[branch: ${branchName}]${commitNote}`;
             const redactNote = redacted.length
                 ? `\n[diff: redacted ${redacted.length} hunk(s) touching sensitive paths: ${redacted.join(", ")}]`
                 : "";
@@ -150,26 +160,42 @@ function createWorktree(config, description) {
     if (res.status !== 0) {
         return { ok: false, error: (res.stderr || res.stdout || "git worktree add failed").trim() };
     }
-    return { ok: true, path: wtDir, branch };
+    // The commit the branch forked from. Everything the subagent does is measured
+    // against it, so committed work is as visible as uncommitted work.
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: wtDir, encoding: "utf8" });
+    return { ok: true, path: wtDir, branch, base: (head.stdout ?? "").trim() };
 }
-function collectWorktreeDiff(worktreePath) {
-    const status = spawnSync("git", ["status", "--porcelain"], {
+/** Commits the subagent added on top of the base. */
+export function countCommitsSince(worktreePath, base) {
+    if (!base)
+        return 0;
+    const res = spawnSync("git", ["rev-list", "--count", `${base}..HEAD`], {
         cwd: worktreePath,
         encoding: "utf8",
     });
-    if (status.status !== 0 || !status.stdout.trim()) {
-        // Maybe the agent committed; fall back to diff against HEAD~1.
-        const log = spawnSync("git", ["log", "--oneline", "@{u}..HEAD"], { cwd: worktreePath, encoding: "utf8" });
-        if (log.status === 0 && log.stdout.trim()) {
-            const diff = spawnSync("git", ["diff", "@{u}", "HEAD"], { cwd: worktreePath, encoding: "utf8" });
-            return diff.stdout ?? "";
-        }
-        return status.stdout?.trim() ? status.stdout : "";
-    }
-    // Stage and diff everything so untracked files show up too.
+    if (res.status !== 0)
+        return 0;
+    return parseInt((res.stdout ?? "0").trim(), 10) || 0;
+}
+/**
+ * Everything the subagent changed, committed or not, as one diff against the
+ * commit the worktree forked from.
+ *
+ * The previous version diffed the working tree and, when it was clean, fell
+ * back to `@{u}..HEAD` — but a freshly created `claw/…` branch has no upstream,
+ * so that always failed and a subagent that COMMITTED its work reported an
+ * empty diff and had its branch deleted.
+ */
+export function collectWorktreeDiff(worktreePath, base) {
+    // Intent-to-add so untracked files appear in the diff.
     spawnSync("git", ["add", "-N", "."], { cwd: worktreePath });
-    const diff = spawnSync("git", ["diff"], { cwd: worktreePath, encoding: "utf8" });
-    return diff.stdout ?? "";
+    if (base) {
+        const diff = spawnSync("git", ["diff", base], { cwd: worktreePath, encoding: "utf8" });
+        if (diff.status === 0)
+            return diff.stdout ?? "";
+    }
+    const fallback = spawnSync("git", ["diff"], { cwd: worktreePath, encoding: "utf8" });
+    return fallback.stdout ?? "";
 }
 function removeWorktree(mainWorkdir, worktreePath, branch) {
     spawnSync("git", ["worktree", "remove", "--force", worktreePath], { cwd: mainWorkdir });

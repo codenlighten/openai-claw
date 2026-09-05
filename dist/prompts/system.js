@@ -67,7 +67,7 @@ ${toolList}
 
 # Environment
 ${stableEnv}
-${claudeMd ? `\n# Project instructions (from CLAUDE.md)\n${claudeMd}` : ""}
+${claudeMd ? `\n# Project instructions\n${claudeMd}` : ""}
 
 # Session
 ${volatileEnv}
@@ -107,7 +107,14 @@ function formatToolList(tools) {
     return lines.join("\n");
 }
 function loadProjectInstructions(workdir) {
-    const candidates = [path.join(workdir, "CLAUDE.md"), path.join(workdir, ".claw", "CLAW.md")];
+    // First match wins. CLAW.md at the project root was missing from this list,
+    // so a repo whose instructions live there (this one included) silently ran
+    // with no project instructions at all.
+    const candidates = [
+        path.join(workdir, "CLAUDE.md"),
+        path.join(workdir, "CLAW.md"),
+        path.join(workdir, ".claw", "CLAW.md"),
+    ];
     for (const p of candidates) {
         if (fs.existsSync(p)) {
             try {

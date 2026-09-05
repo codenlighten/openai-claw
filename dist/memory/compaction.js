@@ -21,21 +21,86 @@ export function estimateTokens(messages) {
     }
     return Math.ceil(n * TOK_PER_CHAR);
 }
+const KEEP_TAIL = 8;
+const SUMMARY_OPEN = "<conversation-summary>";
+/**
+ * The task statement, pulled from the first real user message. Compaction that
+ * drops it leaves the model working from a recap of the middle of the job with
+ * no statement of what the job is. Re-compaction reads it back out of the
+ * previous summary, since the original message is gone by then.
+ */
+function originalRequest(messages) {
+    for (const m of messages) {
+        if (m.role !== "user")
+            continue;
+        const text = messageText(m);
+        if (!text)
+            continue;
+        if (text.startsWith(SUMMARY_OPEN)) {
+            const carried = text.match(/^Original request: (.*)$/m);
+            if (carried)
+                return carried[1];
+            continue;
+        }
+        // Collapsed to one line: it is written back as a single "Original request:"
+        // line, and a multi-line request would lose everything after the first
+        // newline on the next compaction's round-trip.
+        return text.replace(/\s+/g, " ").trim().slice(0, 1000);
+    }
+    return "";
+}
+/** The most recent TodoWrite result — the plan the agent is working through. */
+function latestTodoState(messages) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m.role === "tool" && m.name === "TodoWrite")
+            return messageText(m).slice(0, 1500);
+    }
+    return "";
+}
+function messageText(m) {
+    if (typeof m.content === "string")
+        return m.content;
+    if (Array.isArray(m.content)) {
+        return m.content.map((p) => (p.type === "text" ? p.text : "[image]")).join(" ");
+    }
+    return "";
+}
+/**
+ * Index of the first message to retain verbatim. Walks back off a `tool`
+ * message so the retained window never starts in the middle of a tool group —
+ * an orphaned tool response is dropped by sanitizeMessages, which silently
+ * costs the model the result of work it can see itself requesting.
+ */
+function tailStartIndex(messages) {
+    let start = Math.max(1, messages.length - KEEP_TAIL);
+    while (start > 1 && messages[start]?.role === "tool")
+        start--;
+    return start;
+}
 /**
  * If the conversation is approaching the context window, summarize older turns
- * into one synthetic assistant message and keep recent turns intact.
+ * into one synthetic user message and keep recent turns intact.
+ *
+ * `observedTokens` is the prompt_tokens the API reported for the last request —
+ * the true count. estimateTokens is a 4-chars-per-token guess that runs light
+ * on code and ignores per-message overhead, so it is only the fallback for the
+ * first turn (and immediately after a compaction, when the observation is
+ * stale).
  */
-export async function compactIfNeeded(messages, config, client, force = false) {
-    const tokens = estimateTokens(messages);
+export async function compactIfNeeded(messages, config, client, force = false, observedTokens) {
+    const tokens = observedTokens ?? estimateTokens(messages);
     const limit = Math.floor(config.contextWindow * config.compactThreshold);
     if (!force && tokens < limit)
         return null;
-    // Keep system + last 8 messages; summarize the middle.
     const sys = messages[0];
-    const tail = messages.slice(-8);
-    const middle = messages.slice(1, -8);
+    const start = tailStartIndex(messages);
+    const tail = messages.slice(start);
+    const middle = messages.slice(1, start);
     if (middle.length === 0)
         return null;
+    const request = originalRequest(messages);
+    const todos = latestTodoState(messages);
     // Long tool outputs would otherwise dominate the summary input; cap each
     // message at config.maxToolResultChars so verbose results don't crowd
     // out the conversational signal compaction is meant to preserve.
@@ -65,9 +130,16 @@ export async function compactIfNeeded(messages, config, client, force = false) {
     ];
     const res = await client.complete(summaryReq, []);
     const summary = res.content ?? "(compaction failed)";
+    const pinned = [
+        request ? `Original request: ${request}` : "",
+        todos ? `Plan in progress:\n${todos}` : "",
+    ]
+        .filter(Boolean)
+        .join("\n\n");
+    const body = pinned ? `${pinned}\n\nRecap:\n${summary}` : summary;
     return [
         sys,
-        { role: "user", content: `<conversation-summary>\n${summary}\n</conversation-summary>` },
+        { role: "user", content: `${SUMMARY_OPEN}\n${body}\n</conversation-summary>` },
         ...tail,
     ];
 }

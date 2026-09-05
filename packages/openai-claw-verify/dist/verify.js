@@ -105,6 +105,7 @@ export async function verifyAttestation(attestation, opts = {}) {
                 serversSeen: prov.serversSeen,
                 toolCallsSignedWithProvenance: prov.signed,
                 toolCallsMissingProvenance: prov.missing,
+                structural: true,
             };
         }
     }
@@ -116,14 +117,32 @@ export async function verifyAttestation(attestation, opts = {}) {
         mcp: mcpSummary,
     };
 }
+/** Leaf kinds that have a one-to-one counterpart in the session transcript. */
+const ALIGNED_KINDS = ["user_prompt", "assistant_text", "tool_call"];
+function bump(counts, kind, hash) {
+    let byHash = counts.get(kind);
+    if (!byHash) {
+        byHash = new Map();
+        counts.set(kind, byHash);
+    }
+    byHash.set(hash, (byHash.get(hash) ?? 0) + 1);
+}
+/**
+ * Compare the session transcript against the attested leaves as MULTISETS, in
+ * both directions.
+ *
+ * Counting matters: three identical "continue" prompts must be matched by three
+ * leaves, not by one leaf found three times. Direction matters more: checking
+ * only session -> attestation means a message DELETED from the transcript still
+ * reports as aligned, which is precisely the tampering an audit trail exists to
+ * catch. Extra leaves are expected after a compaction (the transcript is
+ * rewritten by design), so that direction is reported only for uncompacted
+ * sessions.
+ */
 function checkSessionAlignment(leaves, messages) {
     const reasons = [];
     const expected = new Map();
-    const push = (k, h) => {
-        if (!expected.has(k))
-            expected.set(k, []);
-        expected.get(k).push(h);
-    };
+    const push = (k, h) => bump(expected, k, h);
     for (const m of messages) {
         if (m.role === "user" && typeof m.content === "string") {
             push("user_prompt", hashPayload({ content: m.content }));
@@ -147,27 +166,48 @@ function checkSessionAlignment(leaves, messages) {
     }
     const actual = new Map();
     for (const l of leaves) {
-        if (!actual.has(l.kind))
-            actual.set(l.kind, []);
-        actual.get(l.kind).push(l.payloadHash);
+        if (!ALIGNED_KINDS.includes(l.kind))
+            continue;
+        bump(actual, l.kind, l.payloadHash);
     }
-    for (const [kind, hashes] of expected) {
-        const seen = actual.get(kind) ?? [];
-        for (const h of hashes) {
-            if (!seen.includes(h)) {
-                reasons.push(`session has ${kind} payload not present in attestation: ${h.slice(0, 12)}…`);
+    for (const kind of ALIGNED_KINDS) {
+        const want = expected.get(kind) ?? new Map();
+        const have = actual.get(kind) ?? new Map();
+        for (const [hash, n] of want) {
+            const seen = have.get(hash) ?? 0;
+            if (seen < n) {
+                reasons.push(`session has ${n - seen} ${kind} payload(s) the attestation does not record: ${hash.slice(0, 12)}…`);
+            }
+        }
+    }
+    // A compacted session deliberately drops messages the attestation still
+    // covers, so unmatched leaves there are expected rather than suspicious.
+    const compacted = leaves.some((l) => l.kind === "compaction");
+    if (!compacted) {
+        for (const kind of ALIGNED_KINDS) {
+            const want = expected.get(kind) ?? new Map();
+            const have = actual.get(kind) ?? new Map();
+            for (const [hash, n] of have) {
+                const wanted = want.get(hash) ?? 0;
+                if (n > wanted) {
+                    reasons.push(`attestation records ${n - wanted} ${kind} payload(s) missing from the session transcript: ${hash.slice(0, 12)}… (transcript may have been edited)`);
+                }
             }
         }
     }
     return { ok: reasons.length === 0, reasons };
 }
 /**
- * Detect MCP usage in the session and verify the structural provenance
- * chain in the attestation. "Structural" here means kind-counting:
- * mcp_attach, mcp_tool_offered, and permission_decision leaves must each
- * exist with a `seq` lower than each MCP-prefixed tool_call leaf they
- * cover. Strict per-call binding is deferred until session.json itself
- * records MCP events (see whitepaper §9.8).
+ * Detect MCP usage in the session and verify the structural provenance chain in
+ * the attestation. "Structural" means kind-counting: mcp_attach,
+ * mcp_tool_offered and permission_decision leaves must each exist with a `seq`
+ * lower than each MCP-prefixed tool_call leaf they cover.
+ *
+ * What this DOES NOT prove, and callers must not imply that it does: leaves
+ * carry only payload hashes, so a permission_decision recording a REFUSED
+ * consent satisfies the check exactly as a granted one does, and a decision
+ * about an unrelated tool counts too. Strict per-call binding needs
+ * session.json to record MCP events (see whitepaper §9.8).
  */
 function checkMcpProvenance(leaves, messages) {
     // Identify mcp__-prefixed tool calls via the session content, and

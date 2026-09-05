@@ -71,9 +71,12 @@ export async function resolveProjectTrust(config, opts = { interactive: true }) 
             projSettings = JSON.parse(fs.readFileSync(projSettingsPath, "utf8"));
         }
     }
-    catch {
-        // Malformed project settings → treat as no project-level entries.
-        return { trustHooks: true, trustMcp: true };
+    catch (e) {
+        // Fail closed. This is currently equivalent to failing open — every other
+        // reader of this file also parses it and gets nothing — but a trust gate
+        // whose error path grants trust is one parser change away from a hole.
+        console.error(chalk.yellow(`[claw] ${projSettingsPath} is not valid JSON (${e?.message ?? e}); ignoring project-level hooks and MCP servers.`));
+        return { trustHooks: false, trustMcp: false };
     }
     const hookCount = countHooks(projSettings.hooks);
     const mcpCount = Object.keys(projSettings.mcpServers ?? {}).length;

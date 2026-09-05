@@ -1,27 +1,14 @@
 #!/usr/bin/env node
-import dotenv from "dotenv";
+import { loadEnvFiles } from "./env.js";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import chalk from "chalk";
 import { loadConfig } from "./config.js";
-// Load .env files before anything else reads process.env.
-// Order (later wins): bundled project .env, ~/.openai-claw/.env, cwd .env, cwd .env.local.
-const here = path.dirname(new URL(import.meta.url).pathname);
-const projectRoot = path.resolve(here, "..");
-const cwd = process.cwd();
-const userHomeEnv = path.join(process.env.HOME ?? "", ".openai-claw", ".env");
-const envCandidates = [
-    path.join(projectRoot, ".env"),
-    path.join(projectRoot, ".env.local"),
-    userHomeEnv,
-    ...(cwd !== projectRoot ? [path.join(cwd, ".env"), path.join(cwd, ".env.local")] : []),
-];
-for (const file of envCandidates) {
-    if (fs.existsSync(file))
-        dotenv.config({ path: file, override: false });
-}
+loadEnvFiles();
+const here = path.dirname(fileURLToPath(import.meta.url));
 import { Agent } from "./agent.js";
 import { getAllTools } from "./tools/index.js";
 import { PermissionManager } from "./permissions/index.js";
@@ -122,8 +109,8 @@ async function main() {
     const agent = new Agent({
         config,
         tools,
-        permissionCheck: (tool, input) => permissions.check(tool, input),
-        spawnSubagent: (req) => runSubagent(config, (t, i) => permissions.check(t, i), req),
+        permissionCheck: (tool, input, meta) => permissions.check(tool, input, meta),
+        spawnSubagent: (req) => runSubagent(config, (t, i, m) => permissions.check(t, i, m), req),
         runHook: (event, payload) => hookRunner.run(event, payload),
         systemPromptExtras,
     });
@@ -176,6 +163,9 @@ async function main() {
                 if (d.isError)
                     process.stderr.write(chalk.red(d.content.slice(0, 4000)) + "\n");
             }
+            if (evt.type === "warning") {
+                process.stderr.write(chalk.yellow(`! ${evt.data}`) + "\n");
+            }
             if (evt.type === "error") {
                 process.stderr.write(chalk.red(String(evt.data)) + "\n");
                 sawError = true;
@@ -223,7 +213,7 @@ function readStdinToEnd() {
 }
 async function runPluginCli(args) {
     const config = loadConfig();
-    const { installPlugin, removePlugin, listInstalled, searchRegistry } = await import("./plugins/index.js");
+    const { installPlugin, removePlugin, listInstalled, searchRegistry, enablePluginMcp, disablePluginMcp, pluginMcpServers } = await import("./plugins/index.js");
     const [cmd, ...rest] = args;
     if (cmd === "install") {
         const src = rest[0];
@@ -239,6 +229,17 @@ async function runPluginCli(args) {
         }
         const p = r.entry;
         console.error(chalk.dim(`installed ${p.name} (${p.ref?.slice(0, 7) ?? "?"})  skills=${p.provides.skills.length} agents=${p.provides.agents.length} mcp=${p.provides.mcp.length}`));
+        if (p.provides.mcp.length > 0) {
+            const servers = pluginMcpServers(config, p.name);
+            console.error("");
+            console.error(chalk.yellow(`⚠  ${p.name} ships ${p.provides.mcp.length} MCP server(s). They are NOT enabled.`));
+            console.error(chalk.yellow("   MCP servers run arbitrary subprocesses in every project you open."));
+            for (const [name, cfg] of Object.entries(servers)) {
+                const how = cfg?.type === "http" ? cfg.url : [cfg?.command, ...(cfg?.args ?? [])].filter(Boolean).join(" ");
+                console.error(`     · ${name}: ${chalk.dim(how)}`);
+            }
+            console.error(chalk.dim(`   Review them, then run: claw plugins trust ${p.name}`));
+        }
         return;
     }
     if (cmd === "uninstall") {
@@ -258,8 +259,14 @@ async function runPluginCli(args) {
     if (cmd === "plugins") {
         const sub = rest[0] ?? "list";
         if (sub === "list") {
-            for (const p of listInstalled(config))
-                console.log(`${p.name}\t${p.source}\t${p.ref ?? ""}`);
+            for (const p of listInstalled(config)) {
+                const mcp = p.provides.mcp.length
+                    ? p.mcpEnabled
+                        ? `mcp:${p.provides.mcp.length} (trusted)`
+                        : `mcp:${p.provides.mcp.length} (not trusted)`
+                    : "";
+                console.log(`${p.name}\t${p.source}\t${p.ref ?? ""}\t${mcp}`);
+            }
             return;
         }
         if (sub === "search") {
@@ -268,7 +275,22 @@ async function runPluginCli(args) {
                 console.log(`${h.name}\t${h.url}\t${h.description}`);
             return;
         }
-        console.error(chalk.red("usage: claw plugins [list|search <q>]"));
+        if (sub === "trust" || sub === "untrust") {
+            const name = rest[1];
+            if (!name) {
+                console.error(chalk.red(`usage: claw plugins ${sub} <name>`));
+                process.exit(2);
+            }
+            const r = sub === "trust" ? enablePluginMcp(config, name) : disablePluginMcp(config, name);
+            if (!r.ok) {
+                console.error(chalk.red(r.error));
+                process.exit(1);
+            }
+            const verb = sub === "trust" ? "enabled" : "disabled";
+            console.error(chalk.dim(`${verb} MCP server(s) for ${name}: ${r.servers.join(", ") || "(none)"}`));
+            return;
+        }
+        console.error(chalk.red("usage: claw plugins [list|search <q>|trust <name>|untrust <name>]"));
         process.exit(2);
     }
 }
@@ -465,7 +487,7 @@ async function runVerifyCli(args) {
         console.log(chalk.dim("  anchor: none (run `claw attest anchor <id>` to publish)"));
     }
     if (report.mcp) {
-        console.log(chalk.dim(`  mcp: ${report.mcp.serversSeen} server(s), ${report.mcp.toolCallsSignedWithProvenance} call(s) with provenance, ${report.mcp.toolCallsMissingProvenance} missing`));
+        console.log(chalk.dim(`  mcp: ${report.mcp.serversSeen} server(s), ${report.mcp.toolCallsSignedWithProvenance} call(s) with structural provenance, ${report.mcp.toolCallsMissingProvenance} missing`));
     }
     for (const r of report.reasons)
         console.log(chalk.red(`  · ${r}`));
@@ -531,6 +553,9 @@ async function runAuditCli(args) {
     f("sessionAlignment     ", "sessionAlignment");
     f("anchorDigest         ", "anchorDigest");
     f("mcpProvenance        ", "mcpProvenance");
+    if (report.checks.mcpProvenance !== undefined) {
+        console.log(chalk.dim("      structural only — leaf kinds and ordering, not payload contents"));
+    }
     console.log("");
     console.log(chalk.bold("  Identity"));
     console.log(`    publicKeyId:      ${header.publicKeyId}`);
@@ -578,6 +603,9 @@ async function runAuditCli(args) {
     if (report.ok) {
         console.log(chalk.bold(labelGreen("  Result")));
         console.log(labelGreen("    ✓ Claw-side audit trail is valid"));
+        if (!sessionFile || !fs.existsSync(sessionFile)) {
+            console.log(chalk.yellow("    ! transcript not checked — the signature covers the leaf hashes, not the session text"));
+        }
         if (proofFiles.length > 0) {
             console.log(labelGreen("    ✓ OpenTimestamps proofs are well-formed"));
             console.log(chalk.dim("      Run `ots upgrade <file>.ots && ots verify <file>.ots` once Bitcoin"));

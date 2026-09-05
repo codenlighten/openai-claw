@@ -174,6 +174,8 @@ export const builtinCommands = [
             }
             if (sub === "rm") {
                 const ok = deleteMemory(ctx.config, rest.join(" "));
+                if (ok)
+                    ctx.agent.refreshSystemPrompt();
                 console.log(ok ? chalk.dim("deleted") : chalk.red("not found"));
                 return;
             }
@@ -202,7 +204,11 @@ export const builtinCommands = [
                 type: type,
                 body,
             });
-            console.log(chalk.dim(`saved ${file}`));
+            // Memory lives in the system prompt, which is otherwise built once at
+            // startup — without this the new memory would not reach the model until
+            // the next session.
+            ctx.agent.refreshSystemPrompt();
+            console.log(chalk.dim(`saved ${file} (active from the next turn)`));
         },
     },
     {
@@ -215,7 +221,8 @@ export const builtinCommands = [
                 return;
             }
             fs.writeFileSync(file, `# Project instructions for openai-claw\n\n_(Describe the project, conventions, and anything the assistant should know about working here.)_\n`);
-            console.log(chalk.dim(`created ${file}`));
+            ctx.agent.refreshSystemPrompt();
+            console.log(chalk.dim(`created ${file} (loaded into the system prompt)`));
         },
     },
     {
@@ -425,7 +432,8 @@ export const builtinCommands = [
             console.log(chalk.dim("indexing… this may take a moment"));
             try {
                 const r = await buildIndex(ctx.config, (msg) => console.log(chalk.dim(`  ${msg}`)));
-                console.log(chalk.dim(`indexed ${r.filesIndexed} file(s) → ${r.chunks} chunk(s)`));
+                const reused = r.reusedChunks > 0 ? ` (${r.reusedChunks} reused, ${r.chunks - r.reusedChunks} newly embedded)` : "";
+                console.log(chalk.dim(`indexed ${r.filesIndexed} file(s) → ${r.chunks} chunk(s)${reused}`));
             }
             catch (e) {
                 console.log(chalk.red(`index failed: ${e?.message ?? e}`));

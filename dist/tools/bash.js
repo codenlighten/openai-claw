@@ -66,9 +66,22 @@ export const bashTool = {
                     stderr = stderr.slice(0, MAX_OUTPUT) + "\n[stderr truncated]";
                 ctx.onProgress?.(text);
             });
-            child.on("close", (code) => {
+            // A failed spawn (missing bash, deleted cwd) emits "error". With no
+            // listener Node rethrows it as an uncaught exception and kills the CLI,
+            // and this promise never settles.
+            let settled = false;
+            const finish = (result) => {
+                if (settled)
+                    return;
+                settled = true;
                 clearTimeout(timer);
                 ctx.abortSignal?.removeEventListener("abort", abortHandler);
+                resolve(result);
+            };
+            child.on("error", (e) => {
+                finish(err(`Failed to start command: ${e?.message ?? String(e)}`));
+            });
+            child.on("close", (code) => {
                 const parts = [];
                 if (stdout)
                     parts.push(stdout);
@@ -80,12 +93,7 @@ export const bashTool = {
                     parts.push(`[command aborted]`);
                 parts.push(`[exit code: ${code ?? -1}]`);
                 const out = parts.join("\n");
-                if (code !== 0 || timedOut || killed) {
-                    resolve(err(out));
-                }
-                else {
-                    resolve(ok(out || "(no output)"));
-                }
+                finish(code !== 0 || timedOut || killed ? err(out) : ok(out || "(no output)"));
             });
         });
     },
