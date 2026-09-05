@@ -150,7 +150,13 @@ async function main() {
         // front of them in the leaf sequence.
         attestor.recordMcpServers(getConnectedServers(), trust.trustMcp);
         attestor.recordUserPrompt(promptArg);
-        agent.pushUser(prepareUserMessage(promptArg, config).content);
+        const prepared = prepareUserMessage(promptArg, config);
+        // The TUI lists what an @ref pulled in; one-shot dropped it, so a path in
+        // pasted text could inline a file into the prompt with nothing shown.
+        for (const a of prepared.attachments) {
+            process.stderr.write(chalk.dim(`[attached] ${a}`) + "\n");
+        }
+        agent.pushUser(prepared.content);
         await agent.run((evt) => {
             attestor.onAgentEvent(evt);
             if (evt.type === "text_delta")
