@@ -28,6 +28,12 @@ export interface EvalExpectations {
   tools_used?: string[];
   /** Tool names that must NOT have been called — scope discipline. */
   tools_not_used?: string[];
+  /**
+   * Tool names whose call must actually have been REFUSED. Without this a case
+   * that means to exercise a denial can allowlist its way past one and still
+   * pass, testing nothing.
+   */
+  tools_denied?: string[];
   /** No file may exist that wasn't there before the run. */
   no_new_files?: boolean;
   /** These files must be byte-identical to their pre-run content. */
@@ -74,6 +80,7 @@ export interface EvalResult {
   passed: boolean;
   turns: number;
   toolsUsed: string[];
+  toolsDenied: string[];
   durationMs: number;
   costUSD: number;
   totalTokens: number;
@@ -132,6 +139,8 @@ export function snapshotDir(dir: string): Record<string, string> {
 
 export interface EvalObservation {
   toolsUsed: string[];
+  /** Tools whose call was refused by the permission layer. */
+  toolsDenied: string[];
   turns: number;
   errors: string[];
   /** snapshotDir() taken immediately before the agent ran. */
@@ -151,6 +160,7 @@ export function checkExpectations(
 ): string[] {
   const failures: string[] = [];
   const toolsUsed = new Set(obs.toolsUsed);
+  const toolsDenied = new Set(obs.toolsDenied);
 
   if (!allowErrors && obs.errors.length > 0) {
     failures.push(`agent reported ${obs.errors.length} error(s): ${obs.errors.join(" | ")}`);
@@ -194,6 +204,11 @@ export function checkExpectations(
   for (const t of expectations.tools_not_used ?? []) {
     if (toolsUsed.has(t)) failures.push(`tool should not have been used: ${t}`);
   }
+  for (const t of expectations.tools_denied ?? []) {
+    if (!toolsDenied.has(t)) {
+      failures.push(`expected ${t} to be denied, but no denial was recorded`);
+    }
+  }
   if (expectations.no_new_files) {
     const after = snapshotDir(sandbox);
     const created = Object.keys(after).filter((f) => !(f in obs.before));
@@ -220,6 +235,7 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
   const failures: string[] = [];
   const errors: string[] = [];
   const toolsUsed = new Set<string>();
+  const toolsDenied = new Set<string>();
   let turns = 0;
   const start = Date.now();
   try {
@@ -274,6 +290,12 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
         }
         if (evt.type === "usage") turns++;
         if (evt.type === "error") errors.push(String(evt.data));
+        if (evt.type === "tool_result") {
+          const d = evt.data as { name: string; content: string; isError?: boolean };
+          if (d.isError && d.content.startsWith(`Permission denied for ${d.name}`)) {
+            toolsDenied.add(d.name);
+          }
+        }
       }, controller.signal);
     } finally {
       clearTimeout(timer);
@@ -286,7 +308,7 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
       ...checkExpectations(
         sandbox,
         c.expect,
-        { toolsUsed: Array.from(toolsUsed), turns, errors, before },
+        { toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied), turns, errors, before },
         c.allow_errors
       )
     );
@@ -308,6 +330,7 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
       passed: failures.length === 0,
       turns,
       toolsUsed: Array.from(toolsUsed),
+      toolsDenied: Array.from(toolsDenied),
       durationMs: Date.now() - start,
       costUSD,
       totalTokens,

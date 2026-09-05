@@ -105,6 +105,7 @@ describe("checkExpectations", () => {
   let sandbox: string;
   const obs = (over: Partial<EvalObservation> = {}): EvalObservation => ({
     toolsUsed: [],
+    toolsDenied: [],
     turns: 1,
     errors: [],
     before: {},
@@ -168,6 +169,27 @@ describe("checkExpectations", () => {
     );
     expect(failures.join(" ")).toContain("tool not used: Grep");
     expect(failures.join(" ")).toContain("should not have been used: Write");
+  });
+
+  it("catches a case that allowlisted its way past the denial it exists to test", () => {
+    write("note.txt", "noted");
+    const failures = checkExpectations(
+      sandbox,
+      { files_exist: ["note.txt"], tools_denied: ["Bash"] },
+      obs({ toolsUsed: ["Write"], toolsDenied: [] })
+    );
+    expect(failures.join(" ")).toContain("expected Bash to be denied");
+  });
+
+  it("passes when the denial actually happened", () => {
+    write("note.txt", "noted");
+    expect(
+      checkExpectations(
+        sandbox,
+        { files_exist: ["note.txt"], tools_denied: ["Bash"] },
+        obs({ toolsUsed: ["Write"], toolsDenied: ["Bash"] })
+      )
+    ).toEqual([]);
   });
 
   it("catches thrashing that still lands correctly", () => {
