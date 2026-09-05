@@ -1078,3 +1078,56 @@ describe("compaction carries the task statement forward", () => {
     expect(String(summary?.content)).toContain("keep the tests green");
   });
 });
+
+describe("abort", () => {
+  it("stops the loop when the signal fires during a model call", async () => {
+    // The subagent path depends on this: forwarding the signal is only useful
+    // if the signal actually terminates a run in flight.
+    const controller = new AbortController();
+    const client: AgentClient = {
+      complete(_msgs, _tools, opts) {
+        return new Promise((_resolve, reject) => {
+          const signal = opts?.abortSignal;
+          if (signal?.aborted) return reject(new Error("Request aborted."));
+          signal?.addEventListener("abort", () => reject(new Error("Request aborted.")));
+        });
+      },
+    };
+    const agent = new Agent({
+      config: cfg(),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.pushUser("something long");
+    const { events, handler } = collect();
+    const running = agent.run(handler, controller.signal);
+    controller.abort();
+    await running;
+    expect(events.some((e) => e.type === "error" && /abort/i.test(String(e.data)))).toBe(true);
+    expect(events.some((e) => e.type === "done")).toBe(false);
+  });
+
+  it("does not start a turn when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    const client: AgentClient = {
+      async complete() {
+        calls++;
+        return textOnly("should not happen");
+      },
+    };
+    const agent = new Agent({
+      config: cfg(),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.pushUser("x");
+    const { events, handler } = collect();
+    await agent.run(handler, controller.signal);
+    expect(calls).toBe(0);
+    expect(events.some((e) => e.type === "error")).toBe(true);
+  });
+});

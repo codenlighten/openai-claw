@@ -306,12 +306,16 @@ export class Agent {
                     handler({ type: "compaction", data: { skipped: "blocked by PreCompact hook" } });
                 }
             }
-            const compacted = await compactIfNeeded(this.messages, this.opts.config, this.client, false, this.lastPromptTokens);
+            const compacted = await compactIfNeeded(this.messages, this.opts.config, this.client, false, this.lastPromptTokens, abortSignal);
             if (compacted) {
                 const after = estimateTokens(compacted);
                 this.messages = compacted;
                 this.lastPromptTokens = undefined;
                 handler({ type: "compaction", data: { beforeTokens: before, afterTokens: after } });
+            }
+            if (abortSignal?.aborted) {
+                handler({ type: "error", data: "aborted" });
+                return;
             }
             // Heal any orphaned tool_call_ids before sending. Compaction, thrown
             // hooks, or aborted dispatches can leave the conversation with an

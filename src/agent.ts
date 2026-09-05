@@ -385,13 +385,19 @@ export class Agent {
         this.opts.config,
         this.client,
         false,
-        this.lastPromptTokens
+        this.lastPromptTokens,
+        abortSignal
       );
       if (compacted) {
         const after = estimateTokens(compacted);
         this.messages = compacted;
         this.lastPromptTokens = undefined;
         handler({ type: "compaction", data: { beforeTokens: before, afterTokens: after } });
+      }
+
+      if (abortSignal?.aborted) {
+        handler({ type: "error", data: "aborted" });
+        return;
       }
 
       // Heal any orphaned tool_call_ids before sending. Compaction, thrown

@@ -94,7 +94,8 @@ export async function compactIfNeeded(
   config: ClawConfig,
   client: AgentClient,
   force = false,
-  observedTokens?: number
+  observedTokens?: number,
+  abortSignal?: AbortSignal
 ): Promise<ChatMessage[] | null> {
   const tokens = observedTokens ?? estimateTokens(messages);
   const limit = Math.floor(config.contextWindow * config.compactThreshold);
@@ -136,7 +137,9 @@ export async function compactIfNeeded(
     { role: "user", content: `Summarize:\n\n${transcript}` },
   ];
 
-  const res = await client.complete(summaryReq, []);
+  // Summarization is a full model call. Without the signal, Ctrl-C during a
+  // compaction waits for it to finish before anything notices.
+  const res = await client.complete(summaryReq, [], { abortSignal });
   const summary = res.content ?? "(compaction failed)";
   const pinned = [
     request ? `Original request: ${request}` : "",

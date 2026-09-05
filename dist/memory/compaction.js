@@ -88,7 +88,7 @@ function tailStartIndex(messages) {
  * first turn (and immediately after a compaction, when the observation is
  * stale).
  */
-export async function compactIfNeeded(messages, config, client, force = false, observedTokens) {
+export async function compactIfNeeded(messages, config, client, force = false, observedTokens, abortSignal) {
     const tokens = observedTokens ?? estimateTokens(messages);
     const limit = Math.floor(config.contextWindow * config.compactThreshold);
     if (!force && tokens < limit)
@@ -128,7 +128,9 @@ export async function compactIfNeeded(messages, config, client, force = false, o
         },
         { role: "user", content: `Summarize:\n\n${transcript}` },
     ];
-    const res = await client.complete(summaryReq, []);
+    // Summarization is a full model call. Without the signal, Ctrl-C during a
+    // compaction waits for it to finish before anything notices.
+    const res = await client.complete(summaryReq, [], { abortSignal });
     const summary = res.content ?? "(compaction failed)";
     const pinned = [
         request ? `Original request: ${request}` : "",
