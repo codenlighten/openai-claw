@@ -92,6 +92,7 @@ export async function runAutoPr(
   // a project's hooks — arbitrary shell — with no prompt at all.
   const interactive = opts.interactive ?? !!process.stdin.isTTY;
   const trust = await resolveProjectTrust(config, { interactive });
+  config.trustProjectDefinitions = trust.trustDefinitions;
 
   const base = currentBranch(config.workdir);
   const setup = createAutoPrWorktree(config, task);

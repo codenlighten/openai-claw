@@ -42,9 +42,13 @@ export function listSubagents(config: ClawConfig): SubagentDef[] {
   const seen = new Map<string, SubagentDef>();
   for (const def of BUILTIN) seen.set(def.name, def);
 
+  // A project agent's description reaches the main agent's system prompt (via
+  // the Task tool catalog) and its body becomes a subagent's system prompt, so
+  // it only loads once the project has been trusted. Absent flag = not
+  // resolved = not trusted.
   const dirs = [
     path.join(config.homeDir, "agents"),
-    path.join(config.workdir, ".claw", "agents"),
+    ...(config.trustProjectDefinitions === true ? [path.join(config.workdir, ".claw", "agents")] : []),
   ];
   for (const dir of dirs) {
     if (!fs.existsSync(dir)) continue;

@@ -93,6 +93,7 @@ async function main() {
         process.exit(1);
     }
     const trust = await resolveProjectTrust(config, { interactive: !!process.stdin.isTTY });
+    config.trustProjectDefinitions = trust.trustDefinitions;
     const mcpSpecs = loadMcpServerSpecs(config, { includeProject: trust.trustMcp });
     const mcpTools = mcpSpecs.length > 0 ? await startMcpServers(mcpSpecs) : [];
     if (mcpTools.length > 0) {
@@ -677,6 +678,7 @@ async function runMcpCli(args) {
     if (!sub || sub === "list") {
         const config = loadConfig();
         const trust = await resolveProjectTrust(config, { interactive: false });
+        config.trustProjectDefinitions = trust.trustDefinitions;
         const specs = loadMcpServerSpecs(config, { includeProject: trust.trustMcp });
         if (specs.length === 0) {
             console.log(chalk.dim("no MCP servers configured for this project"));

@@ -26,6 +26,13 @@ export interface ClawConfig {
   memoryDir: string;
   maxTurns: number;
   maxToolResultChars: number;
+  /**
+   * Whether <workdir>/.claw agent and skill definitions may be loaded. Set by
+   * resolveProjectTrust; absent means "not yet resolved", which is treated as
+   * NOT trusted. Their text reaches the model's system prompt, so an entry
+   * point that never resolves trust must not load them.
+   */
+  trustProjectDefinitions?: boolean;
 }
 
 const DEFAULTS = {

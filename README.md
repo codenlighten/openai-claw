@@ -169,7 +169,7 @@ Alongside the audit story, claw is a full coding agent — competitive surface w
 - **Subagents** — `Task` tool spawns an isolated agent. Built-in `general-purpose` / `explore` plus a frontmatter-driven registry. Optional `isolation: "worktree"` runs the subagent in a temp git worktree and returns a sanitized diff (sensitive paths like `.env`, `*.pem`, `id_rsa` are redacted).
 - **Plan mode** — read-only investigation, no mutations until approved
 - **Hooks** — `PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` / `SessionStart` / `SessionEnd` / `PreCompact` / `SubagentStop` / `Notification` shell hooks (exit 2 = block)
-- **Project trust gate** — the first time you open a repo whose `.claw/settings.json` defines hooks or MCP servers, claw prompts before honoring them and remembers your answer.
+- **Project trust gate** — the first time you open a repo whose `.claw/` defines hooks, MCP servers, or agent/skill definitions, claw prompts before honoring them and remembers your answer. Agent and skill text reaches the model's system prompt, so it is gated the same as code execution.
 - **Skills** — Markdown skill files with frontmatter, invoked as `/skill-name`
 - **Persistent memory** — `MEMORY.md` index + per-entry frontmatter files
 - **Sessions** — every run is saved under `~/.openai-claw/projects/<slug>/sessions/`; `--continue`, `/sessions`, `/fork` restore or branch them
@@ -238,6 +238,7 @@ What the sandbox actually is, so you can judge it:
 - **MCP subprocesses get a filtered environment.** Only what a server needs to run (`PATH`, `HOME`, locale, …) plus whatever its own `env` block declares. `OPENAI_API_KEY` and everything else in your shell is withheld; widen it deliberately with `OPENAI_CLAW_MCP_ENV_PASSTHROUGH`.
 - **Project-level hooks and MCP servers need trust.** The first run in a directory that declares them prompts; the answer is remembered in `trustedProjects`. Non-interactive runs deny.
 - **Plugin MCP servers need a second, explicit step.** `claw install` never registers them — it prints what they would run. `claw plugins trust <name>` registers them, `claw plugins untrust <name>` removes them. This is separate because plugin servers land in *user* settings and so apply to every project.
+- **A project cannot write to your system prompt without consent.** `.claw/agents/*.md` and `.claw/skills/*/SKILL.md` are loaded only after the trust prompt — an agent definition's description otherwise reaches the model through the Task tool catalog before you type anything.
 - **The dashboard binds loopback only.** It serves whole transcripts with no authentication.
 
 Not in scope: claw does not sandbox the filesystem or network of the commands you approve. Approving a command runs it with your privileges.

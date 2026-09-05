@@ -6,6 +6,7 @@ import {
   isProjectTrusted,
   markProjectTrusted,
   resolveProjectTrust,
+  countProjectDefinitions,
   type TrustPrompter,
 } from "../src/trust.js";
 import type { ClawConfig } from "../src/config.js";
@@ -66,20 +67,20 @@ describe("project trust store", () => {
 describe("resolveProjectTrust", () => {
   it("auto-allows when project has no hooks or MCP", async () => {
     const out = await resolveProjectTrust(cfg(), { interactive: true });
-    expect(out).toEqual({ trustHooks: true, trustMcp: true });
+    expect(out).toEqual({ trustHooks: true, trustMcp: true, trustDefinitions: true });
   });
 
   it("auto-allows once project is trusted", async () => {
     writeProjectSettings({ hooks: { PreToolUse: [{ command: "echo x" }] } });
     markProjectTrusted(cfg());
     const out = await resolveProjectTrust(cfg(), { interactive: true });
-    expect(out).toEqual({ trustHooks: true, trustMcp: true });
+    expect(out).toEqual({ trustHooks: true, trustMcp: true, trustDefinitions: true });
   });
 
   it("denies non-interactive runs with project-level hooks", async () => {
     writeProjectSettings({ hooks: { PreToolUse: [{ command: "echo x" }] } });
     const out = await resolveProjectTrust(cfg(), { interactive: false });
-    expect(out).toEqual({ trustHooks: false, trustMcp: false });
+    expect(out).toEqual({ trustHooks: false, trustMcp: false, trustDefinitions: false });
     expect(isProjectTrusted(cfg())).toBe(false);
   });
 
@@ -87,7 +88,7 @@ describe("resolveProjectTrust", () => {
     writeProjectSettings({ hooks: { PreToolUse: [{ command: "echo x" }] } });
     const prompter: TrustPrompter = async () => "yes";
     const out = await resolveProjectTrust(cfg(), { interactive: true, prompter });
-    expect(out).toEqual({ trustHooks: true, trustMcp: true });
+    expect(out).toEqual({ trustHooks: true, trustMcp: true, trustDefinitions: true });
     expect(isProjectTrusted(cfg())).toBe(true);
   });
 
@@ -95,7 +96,7 @@ describe("resolveProjectTrust", () => {
     writeProjectSettings({ mcpServers: { srv: { command: "x" } } });
     const prompter: TrustPrompter = async () => "once";
     const out = await resolveProjectTrust(cfg(), { interactive: true, prompter });
-    expect(out).toEqual({ trustHooks: true, trustMcp: true });
+    expect(out).toEqual({ trustHooks: true, trustMcp: true, trustDefinitions: true });
     expect(isProjectTrusted(cfg())).toBe(false);
   });
 
@@ -103,7 +104,7 @@ describe("resolveProjectTrust", () => {
     writeProjectSettings({ mcpServers: { srv: { command: "x" } } });
     const prompter: TrustPrompter = async () => "no";
     const out = await resolveProjectTrust(cfg(), { interactive: true, prompter });
-    expect(out).toEqual({ trustHooks: false, trustMcp: false });
+    expect(out).toEqual({ trustHooks: false, trustMcp: false, trustDefinitions: false });
     expect(isProjectTrusted(cfg())).toBe(false);
   });
 
@@ -112,6 +113,57 @@ describe("resolveProjectTrust", () => {
     fs.writeFileSync(path.join(work, ".claw", "settings.json"), "{not json");
     const out = await resolveProjectTrust(cfg(), { interactive: false });
     // A trust gate must not grant trust on its own error path.
-    expect(out).toEqual({ trustHooks: false, trustMcp: false });
+    expect(out).toEqual({ trustHooks: false, trustMcp: false, trustDefinitions: false });
+  });
+});
+
+describe("project agent and skill definitions", () => {
+  const writeAgent = (name: string, body: string) => {
+    const dir = path.join(work, ".claw", "agents");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${name}.md`), body);
+  };
+  const writeSkill = (name: string, body: string) => {
+    const dir = path.join(work, ".claw", "skills", name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "SKILL.md"), body);
+  };
+
+  it("counts them alongside hooks and MCP servers", () => {
+    writeAgent("helper", "---\nname: helper\ndescription: d\n---\nbody\n");
+    writeSkill("deploy", "---\nname: deploy\ndescription: d\n---\nbody\n");
+    expect(countProjectDefinitions(work)).toBe(2);
+  });
+
+  it("prompts for a project that only defines an agent", async () => {
+    // The agent's description lands in the main agent's system prompt via the
+    // Task catalog, so it needs consent even with no hooks or MCP servers.
+    writeAgent("helper", "---\nname: helper\ndescription: injected text\n---\nbody\n");
+    let asked = 0;
+    const prompter: TrustPrompter = async (req) => {
+      asked++;
+      expect(req.definitions).toBe(1);
+      return "no";
+    };
+    const out = await resolveProjectTrust(cfg(), { interactive: true, prompter });
+    expect(asked).toBe(1);
+    expect(out.trustDefinitions).toBe(false);
+  });
+
+  it("grants definitions along with the rest on yes", async () => {
+    writeAgent("helper", "---\nname: helper\ndescription: d\n---\nbody\n");
+    const out = await resolveProjectTrust(cfg(), { interactive: true, prompter: async () => "yes" });
+    expect(out).toEqual({ trustHooks: true, trustMcp: true, trustDefinitions: true });
+  });
+
+  it("denies definitions on a non-interactive run", async () => {
+    writeAgent("helper", "---\nname: helper\ndescription: d\n---\nbody\n");
+    const out = await resolveProjectTrust(cfg(), { interactive: false });
+    expect(out.trustDefinitions).toBe(false);
+  });
+
+  it("does not prompt when the project defines nothing", async () => {
+    const out = await resolveProjectTrust(cfg(), { interactive: true, prompter: async () => "no" });
+    expect(out.trustDefinitions).toBe(true);
   });
 });

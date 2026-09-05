@@ -43,19 +43,23 @@ export type TrustPrompter = (req: {
   workdir: string;
   hooks: number;
   mcpServers: number;
+  definitions: number;
 }) => Promise<TrustAnswer>;
 
-export const defaultTrustPrompter: TrustPrompter = ({ workdir, hooks, mcpServers }) => {
+export const defaultTrustPrompter: TrustPrompter = ({ workdir, hooks, mcpServers, definitions }) => {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     const counts: string[] = [];
     if (hooks > 0) counts.push(`${hooks} hook(s)`);
     if (mcpServers > 0) counts.push(`${mcpServers} MCP server(s)`);
+    if (definitions > 0) counts.push(`${definitions} agent/skill definition(s)`);
     process.stdout.write(
       "\n" +
-        chalk.yellow("⚠  This project's .claw/settings.json defines " + counts.join(" and ") + ".") +
+        chalk.yellow("⚠  This project's .claw/ directory defines " + counts.join(", ") + ".") +
         "\n" +
         chalk.yellow("   Hooks run arbitrary shell commands. MCP servers run arbitrary subprocesses.") +
+        "\n" +
+        chalk.yellow("   Agent and skill definitions are injected into the model's system prompt.") +
         "\n" +
         chalk.yellow(`   Allow them in ${workdir}? `) +
         chalk.dim("[y]es (remember) / [N]o / [o]nce: ")
@@ -73,6 +77,24 @@ export const defaultTrustPrompter: TrustPrompter = ({ workdir, hooks, mcpServers
 export interface ProjectTrustOutcome {
   trustHooks: boolean;
   trustMcp: boolean;
+  /** Whether <workdir>/.claw/agents and .claw/skills may be loaded. */
+  trustDefinitions: boolean;
+}
+
+/** Count project-supplied agent and skill definitions. */
+export function countProjectDefinitions(workdir: string): number {
+  let n = 0;
+  const agentsDir = path.join(workdir, ".claw", "agents");
+  try {
+    n += fs.readdirSync(agentsDir).filter((f) => f.endsWith(".md")).length;
+  } catch {}
+  const skillsDir = path.join(workdir, ".claw", "skills");
+  try {
+    for (const entry of fs.readdirSync(skillsDir)) {
+      if (fs.existsSync(path.join(skillsDir, entry, "SKILL.md"))) n++;
+    }
+  } catch {}
+  return n;
 }
 
 /**
@@ -101,45 +123,50 @@ export async function resolveProjectTrust(
         `[claw] ${projSettingsPath} is not valid JSON (${e?.message ?? e}); ignoring project-level hooks and MCP servers.`
       )
     );
-    return { trustHooks: false, trustMcp: false };
+    return DENY;
   }
 
   const hookCount = countHooks(projSettings.hooks);
   const mcpCount = Object.keys(projSettings.mcpServers ?? {}).length;
-  if (hookCount === 0 && mcpCount === 0) {
-    return { trustHooks: true, trustMcp: true };
+  const defCount = countProjectDefinitions(config.workdir);
+  if (hookCount === 0 && mcpCount === 0 && defCount === 0) {
+    return ALLOW;
   }
 
   if (isProjectTrusted(config)) {
-    return { trustHooks: true, trustMcp: true };
+    return ALLOW;
   }
 
   if (!opts.interactive) {
     console.error(
       chalk.yellow(
-        `[claw] ${path.resolve(config.workdir)} defines ${hookCount} hook(s) and ${mcpCount} MCP server(s); skipping (non-interactive run). Run interactively and answer [y] to trust this project.`
+        `[claw] ${path.resolve(config.workdir)} defines ${hookCount} hook(s), ${mcpCount} MCP server(s) and ${defCount} agent/skill definition(s); skipping (non-interactive run). Run interactively and answer [y] to trust this project.`
       )
     );
-    return { trustHooks: false, trustMcp: false };
+    return DENY;
   }
 
   const answer = await (opts.prompter ?? defaultTrustPrompter)({
     workdir: path.resolve(config.workdir),
     hooks: hookCount,
     mcpServers: mcpCount,
+    definitions: defCount,
   });
   if (answer === "yes") {
     markProjectTrusted(config);
-    return { trustHooks: true, trustMcp: true };
+    return ALLOW;
   }
   if (answer === "once") {
-    return { trustHooks: true, trustMcp: true };
+    return ALLOW;
   }
   console.error(
-    chalk.yellow(`[claw] skipping project-level hooks and MCP servers for this session.`)
+    chalk.yellow(`[claw] skipping project-level hooks, MCP servers and agent/skill definitions for this session.`)
   );
-  return { trustHooks: false, trustMcp: false };
+  return DENY;
 }
+
+const ALLOW: ProjectTrustOutcome = { trustHooks: true, trustMcp: true, trustDefinitions: true };
+const DENY: ProjectTrustOutcome = { trustHooks: false, trustMcp: false, trustDefinitions: false };
 
 function countHooks(hooks: unknown): number {
   if (!hooks || typeof hooks !== "object") return 0;
