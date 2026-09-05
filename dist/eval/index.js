@@ -64,6 +64,7 @@ export function snapshotDir(dir) {
 export function checkExpectations(sandbox, expectations = {}, obs, allowErrors = false) {
     const failures = [];
     const toolsUsed = new Set(obs.toolsUsed);
+    const toolsDenied = new Set(obs.toolsDenied);
     if (!allowErrors && obs.errors.length > 0) {
         failures.push(`agent reported ${obs.errors.length} error(s): ${obs.errors.join(" | ")}`);
     }
@@ -109,6 +110,11 @@ export function checkExpectations(sandbox, expectations = {}, obs, allowErrors =
         if (toolsUsed.has(t))
             failures.push(`tool should not have been used: ${t}`);
     }
+    for (const t of expectations.tools_denied ?? []) {
+        if (!toolsDenied.has(t)) {
+            failures.push(`expected ${t} to be denied, but no denial was recorded`);
+        }
+    }
     if (expectations.no_new_files) {
         const after = snapshotDir(sandbox);
         const created = Object.keys(after).filter((f) => !(f in obs.before));
@@ -136,6 +142,7 @@ async function runOne(c) {
     const failures = [];
     const errors = [];
     const toolsUsed = new Set();
+    const toolsDenied = new Set();
     let turns = 0;
     const start = Date.now();
     try {
@@ -189,6 +196,12 @@ async function runOne(c) {
                     turns++;
                 if (evt.type === "error")
                     errors.push(String(evt.data));
+                if (evt.type === "tool_result") {
+                    const d = evt.data;
+                    if (d.isError && d.content.startsWith(`Permission denied for ${d.name}`)) {
+                        toolsDenied.add(d.name);
+                    }
+                }
             }, controller.signal);
         }
         finally {
@@ -197,7 +210,7 @@ async function runOne(c) {
         if (controller.signal.aborted) {
             failures.push(`timed out after ${timeoutMs}ms (${turns} turn(s) completed)`);
         }
-        failures.push(...checkExpectations(sandbox, c.expect, { toolsUsed: Array.from(toolsUsed), turns, errors, before }, c.allow_errors));
+        failures.push(...checkExpectations(sandbox, c.expect, { toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied), turns, errors, before }, c.allow_errors));
         return finalize(agent.usage.totalCostUSD, agent.usage.totalTokens);
     }
     catch (e) {
@@ -222,6 +235,7 @@ async function runOne(c) {
             passed: failures.length === 0,
             turns,
             toolsUsed: Array.from(toolsUsed),
+            toolsDenied: Array.from(toolsDenied),
             durationMs: Date.now() - start,
             costUSD,
             totalTokens,
