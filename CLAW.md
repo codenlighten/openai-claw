@@ -60,6 +60,7 @@ Always run `npm run typecheck` and `npm test` before reporting completion of any
 - **MCP servers get a filtered environment** (`buildServerEnv` in `src/mcp/fingerprint.ts`). Never hand a subprocess `process.env`.
 - **Plugin MCP servers are not registered on install.** They land in *user* settings, which no project trust gate covers, so they need `claw plugins trust <name>`.
 - **The dashboard binds 127.0.0.1.** It has no authentication.
+- **`claw pr` runs in a worktree, never the user's checkout.** In-place `checkout -b` plus `git add -A` swept uncommitted work into an agent commit and pushed it. Every top-level subcommand that runs an agent must also pass the project trust gate itself — `main()`'s gate is dispatched past.
 - **The verifier must not overclaim.** `mcpProvenance` is a structural check over leaf kinds; leaves carry payload hashes, so it cannot read consent values. Say so wherever it is reported.
 
 ## Agent-loop invariants

@@ -178,7 +178,7 @@ Alongside the audit story, claw is a full coding agent — competitive surface w
 - **Cost tracking** — per-turn cost is logged to `cost.log` and surfaced via `/cost` and the optional dashboard
 - **MCP** — stdio and streamable-HTTP MCP clients; remote tools wrapped as `mcp__<server>__<tool>`
 - **Plugins** — `claw install <git-url>` / `claw uninstall <name>` / `claw plugins [list|search|trust|untrust]`
-- **Auto-PR** — `claw pr "<task>"` runs the agent in a worktree and opens a PR
+- **Auto-PR** — `claw pr "<task>"` runs the agent in an isolated git worktree, commits, pushes and opens a draft PR. Your working tree is never touched, and the run is attested like any other session.
 - **Dashboard** — `claw dashboard` serves a loopback-only web UI for cost, sessions, evals
 - **Notifications** — desktop notifications for long-running tools and session completion
 - **Self-review** — `/review` asks the agent to critique the current branch's diff
