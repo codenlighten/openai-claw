@@ -4,13 +4,23 @@ export interface ToolContext {
   config: ClawConfig;
   // Bag of services the tool may need. Kept loose so each tool only pulls what it uses.
   abortSignal?: AbortSignal;
-  permissionCheck: (tool: string, input: unknown) => Promise<PermissionDecision>;
+  permissionCheck: (
+    tool: string,
+    input: unknown,
+    meta?: PermissionMeta
+  ) => Promise<PermissionDecision>;
   // For subagents to spawn child agents.
   spawnSubagent?: (opts: SubagentRequest) => Promise<string>;
   // For long-running tools to stream progress lines back to the UI.
   onProgress?: (chunk: string) => void;
   // Identifies the in-flight tool call so the UI can route progress events.
   callId?: string;
+}
+
+/** What the caller knows about the specific call being authorized. */
+export interface PermissionMeta {
+  /** True when the tool can change the user's project or environment. */
+  mutates?: boolean;
 }
 
 export type PermissionDecision =
