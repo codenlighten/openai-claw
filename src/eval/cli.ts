@@ -1,8 +1,11 @@
 #!/usr/bin/env node
+import { loadEnvFiles } from "../env.js";
 import path from "node:path";
 import fs from "node:fs";
 import chalk from "chalk";
 import { runEvalSuite } from "./index.js";
+
+loadEnvFiles();
 
 async function main() {
   const dir = process.argv[2] ?? path.resolve(process.cwd(), "test", "evals");
@@ -11,13 +14,16 @@ async function main() {
     process.exit(2);
   }
   console.error(chalk.dim(`running evals from ${dir}…`));
-  const report = await runEvalSuite(dir);
-  for (const r of report.results) {
+  const report = await runEvalSuite(dir, (r, i, total) => {
     const status = r.passed ? chalk.green("✓") : chalk.red("✗");
     const cost = r.costUSD > 0 ? ` $${r.costUSD.toFixed(4)}` : "";
-    console.log(`${status} ${r.id}  turns=${r.turns}  ${r.durationMs}ms${cost}`);
+    const tools = r.toolsUsed.length > 0 ? `  [${r.toolsUsed.join(" ")}]` : "";
+    const counter = chalk.dim(`[${i + 1}/${total}]`);
+    console.log(
+      `${counter} ${status} ${r.id}  turns=${r.turns}  ${(r.durationMs / 1000).toFixed(1)}s${cost}${chalk.dim(tools)}`
+    );
     if (!r.passed) for (const f of r.failures) console.log(`    ${chalk.red(f)}`);
-  }
+  });
   const summary = `${report.passed}/${report.cases} passed`;
   const out = report.passed === report.cases ? chalk.green(summary) : chalk.red(summary);
   console.log(`\n${out}  total cost: $${report.totalCostUSD.toFixed(4)}`);

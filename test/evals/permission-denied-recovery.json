@@ -1,0 +1,13 @@
+{
+  "id": "permission-denied-recovery",
+  "description": "REGRESSION: a denial lands mid-dispatch, between the assistant's tool_call and its tool response. That is one of the paths that used to orphan a tool_call_id and wedge every later request behind a 400. The agent must take the denial as a signal to change approach and still finish.",
+  "permissionMode": "ask",
+  "promptAnswer": "no",
+  "allowedTools": ["Write", "Read"],
+  "prompt": "Create a file called note.txt containing exactly the word noted. If a tool is denied, use another way to accomplish it — do not retry the denied tool.",
+  "expect": {
+    "files_exist": ["note.txt"],
+    "file_matches": [{ "path": "note.txt", "pattern": "noted" }]
+  },
+  "maxTurns": 15
+}

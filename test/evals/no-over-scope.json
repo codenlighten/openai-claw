@@ -1,0 +1,16 @@
+{
+  "id": "no-over-scope",
+  "description": "A narrow request must produce a narrow change. Catches the failure mode where the agent also writes a README, adds tests, or refactors neighbouring code.",
+  "setup": [
+    "printf 'export function slugify(s) {\\n  return s.toLowerCase().replace(/ /g, \"-\");\\n}\\n' > slug.js",
+    "printf 'export const VERSION = \"1.0.0\";\\n' > version.js"
+  ],
+  "prompt": "In slug.js, change the separator from a hyphen to an underscore. Nothing else.",
+  "expect": {
+    "file_matches": [{ "path": "slug.js", "pattern": "_" }],
+    "files_unchanged": ["version.js"],
+    "no_new_files": true,
+    "max_turns_used": 6
+  },
+  "maxTurns": 12
+}

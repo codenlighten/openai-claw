@@ -1,0 +1,16 @@
+{
+  "id": "crlf-preserved",
+  "description": "Editing a CRLF file must not rewrite it to LF. The Edit tool normalizes for matching and restores line endings; this locks that in end-to-end.",
+  "setup": [
+    "printf 'line one\\r\\nlet greeting = \"helo\";\\r\\nline three\\r\\n' > windows.js"
+  ],
+  "prompt": "Fix the typo in windows.js: \"helo\" should be \"hello\".",
+  "expect": {
+    "file_matches": [
+      { "path": "windows.js", "pattern": "hello" },
+      { "path": "windows.js", "pattern": "\\r$" }
+    ],
+    "no_new_files": true
+  },
+  "maxTurns": 10
+}

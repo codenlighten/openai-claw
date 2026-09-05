@@ -1,0 +1,18 @@
+{
+  "id": "subagent-delegation",
+  "description": "An explicit delegation request must actually reach the Task tool and come back with a usable answer.",
+  "setup": [
+    "mkdir -p deep/nested/path",
+    "printf 'export const SECRET_HANDLER = () => 42;\\n' > deep/nested/path/handler.js",
+    "for i in 1 2 3 4 5; do printf 'export const filler%s = %s;\\n' \"$i\" \"$i\" > \"noise$i.js\"; done"
+  ],
+  "prompt": "Use a subagent to find which file defines SECRET_HANDLER, then tell me the path.",
+  "expect": {
+    "tools_used": [
+      "Task"
+    ],
+    "no_new_files": true
+  },
+  "maxTurns": 10,
+  "timeoutMs": 240000
+}
