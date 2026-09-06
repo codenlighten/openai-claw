@@ -37,6 +37,7 @@ A TypeScript reimplementation of Anthropic's Claude Code, but powered by OpenAI'
 | Add a slash command | Append to `builtinCommands` in `src/commands/index.ts`. |
 | Add a hook event | Extend `HookEvent` union in `src/hooks/index.ts` and fire from wherever the event occurs. |
 | Update model pricing | `src/cost.ts` — keep `MODEL_PRICES` current. |
+| Change semantic-index chunking | `chunkText` in `src/rag/index.ts`, then `node tools/rag-bench.mjs` before and after. Bump `INDEX_VERSION` so existing indexes rebuild. Do not claim a retrieval improvement you have not measured — two plausible ones already failed to survive contact with the benchmark. |
 | Add a system-prompt directive | `src/prompts/system.ts`. |
 | Run tests | `npm test` (claw) — the verify package has its own: `npm test -w @smartledger.technology/openai-claw-verify` |
 | Add an eval case | A JSON file in `test/evals/`. Shape is `EvalCase` in `src/eval/index.ts`; `test/eval.test.ts` verifies every case's `setup` runs and that its expectations reference real files. Run the suite with `npm run eval` — it makes real model calls and costs money. |

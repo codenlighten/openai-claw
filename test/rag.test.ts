@@ -210,7 +210,7 @@ describe("chunking", () => {
     const fn = (n: number) =>
       `export function fn${n}(a, b) {\n  const x = a + b;\n  return x * ${n};\n}\n`;
     const src = Array.from({ length: 150 }, (_, i) => fn(i)).join("\n");
-    const chunks = chunkText(src, "src/math.ts");
+    const chunks = chunkText(src);
     expect(chunks.length).toBeGreaterThan(1);
     for (const c of chunks) {
       const opens = (c.match(/\{/g) ?? []).length;
@@ -219,34 +219,37 @@ describe("chunking", () => {
     }
   });
 
-  it("prefixes every chunk with the file path", () => {
-    const chunks = chunkText("export const a = 1;\n", "src/deep/thing.ts");
+  it("does not inject the file path into chunk text", () => {
+    // Measured as slightly harmful to ranking (tools/rag-bench.mjs) and
+    // redundant: the Semantic tool prints the path beside every hit.
+    const chunks = chunkText("export const a = 1;\n");
     expect(chunks).toHaveLength(1);
-    expect(chunks[0].startsWith("// src/deep/thing.ts\n")).toBe(true);
+    expect(chunks[0]).not.toContain("//");
   });
 
   it("splits markdown on headings", () => {
     const md = Array.from({ length: 30 }, (_, i) => `## Section ${i}\n\n${"body ".repeat(60)}\n`).join("\n");
-    const chunks = chunkText(md, "doc.md");
+    const chunks = chunkText(md);
     expect(chunks.length).toBeGreaterThan(1);
     // No chunk should begin mid-paragraph — each starts at a heading.
     for (const c of chunks) {
-      const firstLine = c.split("\n")[1] ?? "";
-      expect(firstLine.startsWith("## Section")).toBe(true);
+      expect(c.split("\n")[0].startsWith("## Section")).toBe(true);
     }
   });
 
   it("falls back to windowing for a single oversized unit", () => {
     const huge = `export function big() {\n${"  const line = 1;\n".repeat(1200)}}\n`;
-    const chunks = chunkText(huge, "big.ts");
+    const chunks = chunkText(huge);
     expect(chunks.length).toBeGreaterThan(1);
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(4000 + 20);
   });
 
   it("never returns an empty chunk", () => {
     for (const src of ["", "\n\n\n", "x"]) {
-      for (const c of chunkText(src, "f.ts")) expect(c.trim().length).toBeGreaterThan(0);
+      for (const c of chunkText(src)) expect(c.trim().length).toBeGreaterThan(0);
     }
+    expect(chunkText("")).toEqual([]);
+    expect(chunkText("   \n\n ")).toEqual([]);
   });
 
   it("path context makes a file findable by its location", async () => {

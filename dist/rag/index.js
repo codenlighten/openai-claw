@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import OpenAI from "openai";
 const EMBED_MODEL = "text-embedding-3-small";
 /** Bump when the on-disk shape changes; older indexes are treated as absent. */
-const INDEX_VERSION = 3;
+const INDEX_VERSION = 4;
 const CHUNK_CHARS = 4000;
 const CHUNK_OVERLAP = 400;
 const MAX_FILE_BYTES = 256 * 1024;
@@ -171,15 +171,29 @@ function windowUnit(unit) {
 /**
  * Chunk a file for embedding.
  *
- * Fixed character windows routinely cut through the middle of a function, so a
- * chunk would carry the tail of one definition and the head of the next and
- * match neither well. Units are packed greedily instead, and each chunk is
- * prefixed with the file path so location is part of what gets embedded —
- * "where is auth checked" should be able to match `src/auth/check.ts`.
+ * Fixed character windows cut through the middle of a function, so a chunk
+ * could carry the tail of one definition and the head of the next. Units are
+ * packed greedily instead, which keeps a returned snippet readable as a whole
+ * thing.
+ *
+ * MEASURED: this does NOT improve retrieval. Against 30 intent-phrased queries
+ * over this repository (tools/rag-bench.mjs), structural chunking and fixed
+ * windows both score 21/30 recall@1, with MRR 0.784 vs 0.796 — and editing one
+ * source file between runs moved a single variant by more than that gap. The
+ * difference is below the noise floor. It is kept for snippet coherence: a
+ * chunk that does not stop halfway through a function is worth more to whoever
+ * reads it than to whoever ranks it.
+ *
+ * An earlier version also prefixed each chunk with its file path, on the theory
+ * that "where is auth checked" should match `src/auth/check.ts`. The benchmark
+ * says otherwise: 20/30 and MRR 0.771, slightly WORSE than plain fixed windows,
+ * because a filename lexically matching a query word outranks files that
+ * actually implement the thing ("combining leaf hashes into a root" retrieved
+ * leaf.ts over merkle.ts). It was also redundant — SearchHit carries `file` and
+ * the Semantic tool already prints the path beside every hit. Removed.
  */
-export function chunkText(text, relPath = "") {
-    const header = relPath ? `// ${relPath}\n` : "";
-    const budget = Math.max(200, CHUNK_CHARS - header.length);
+export function chunkText(text) {
+    const budget = CHUNK_CHARS;
     const packed = [];
     let current = "";
     for (const unit of splitUnits(text)) {
@@ -200,8 +214,12 @@ export function chunkText(text, relPath = "") {
     }
     if (current)
         packed.push(current);
-    const chunks = packed.length > 0 ? packed : [text];
-    return chunks.map((c) => header + c);
+    // Nothing worth embedding in a blank chunk. buildIndex already skips empty
+    // files, but a whitespace-only chunk was still reachable from here.
+    const kept = packed.filter((c) => c.trim().length > 0);
+    if (kept.length > 0)
+        return kept;
+    return text.trim() ? [text] : [];
 }
 /**
  * Build (or rebuild) the project's semantic index.
@@ -262,7 +280,7 @@ export async function buildIndex(config, onProgress) {
                 reusedChunks += cached.length;
                 continue;
             }
-            chunkText(text, rel).forEach((p, i) => pending.push({ file: rel, chunkIndex: i, fileHash, text: p }));
+            chunkText(text).forEach((p, i) => pending.push({ file: rel, chunkIndex: i, fileHash, text: p }));
         }
         catch { }
     }
