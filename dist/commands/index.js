@@ -4,7 +4,7 @@ import path from "node:path";
 import { saveUserSetting } from "../config.js";
 import { listMemories, writeMemory, deleteMemory } from "../memory/index.js";
 import { listSkills, findSkill } from "../skills/index.js";
-import { setPlanMode, planModeExtra } from "../planmode.js";
+import { setPlanMode } from "../planmode.js";
 import { loadSession, saveSession, listSessions, forkSession } from "../session.js";
 import { loadMcpServerSpecs, getMcpDirectory } from "../mcp/index.js";
 import { readCostLog, costByDay, costByModel } from "../cost.js";
@@ -12,7 +12,6 @@ import { buildIndex, loadIndex, semanticSearch } from "../rag/index.js";
 import { runSelfReview, applyProposal } from "../self-review/index.js";
 import { installPlugin, removePlugin, listInstalled, searchRegistry } from "../plugins/index.js";
 import { prepareUserMessage } from "../input.js";
-import { HookRunner } from "../hooks/index.js";
 import { spawnSync } from "node:child_process";
 export const builtinCommands = [
     {
@@ -108,14 +107,15 @@ export const builtinCommands = [
         description: "Toggle plan mode",
         run(_args, ctx) {
             const enabled = ctx.config.permissionMode !== "plan";
-            setPlanMode(ctx.config, enabled);
-            if (enabled) {
-                ctx.agent.pushUser(`<system>${planModeExtra()}</system>`);
-                console.log(chalk.cyan("plan mode ON — read-only investigation, no mutations"));
-            }
-            else {
-                console.log(chalk.cyan("plan mode OFF"));
-            }
+            setPlanMode(ctx.config, enabled, ctx.permissions.mode);
+            // The directive lives in the system prompt, so switching plan mode off
+            // removes it. It used to be pushed as a <system>-tagged user message that
+            // stayed in the transcript forever, telling the model it was still in
+            // plan mode long after it had left.
+            ctx.agent.refreshSystemPrompt();
+            console.log(enabled
+                ? chalk.cyan("plan mode ON — read-only investigation, no mutations")
+                : chalk.cyan(`plan mode OFF (permission mode: ${ctx.config.permissionMode})`));
         },
     },
     {
@@ -197,7 +197,11 @@ export const builtinCommands = [
                 console.log(chalk.red(`unknown type: ${type}`));
                 return;
             }
-            const name = nameParts.join("-").toLowerCase().replace(/[^a-z0-9-]/g, "-");
+            const name = nameParts.join("-").toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
+            if (!name) {
+                console.log(chalk.red("usage: /remember <type> <name> :: <description> :: <body>  (the name is missing)"));
+                return;
+            }
             const file = writeMemory(ctx.config, {
                 name,
                 description,
@@ -368,8 +372,6 @@ export const builtinCommands = [
         name: "hooks",
         description: "List configured hooks",
         run(_args, ctx) {
-            const hooks = new HookRunner(ctx.config);
-            // HookRunner stores hooks privately; reflect via a probe by reading settings.
             const userSettings = readJsonOr(path.join(ctx.config.homeDir, "settings.json"), {});
             const projSettings = readJsonOr(path.join(ctx.config.workdir, ".claw", "settings.json"), {});
             const all = [...(userSettings.hooks ? entriesOf(userSettings.hooks) : []), ...(projSettings.hooks ? entriesOf(projSettings.hooks) : [])];
@@ -382,7 +384,6 @@ export const builtinCommands = [
                     console.log(`  [${event}] ${d.matcher ? `matcher=${d.matcher} ` : ""}${d.command}`);
                 }
             }
-            void hooks;
         },
     },
     {
@@ -460,7 +461,8 @@ export const builtinCommands = [
                 }
                 console.log(chalk.dim("\nTo accept all: /self-review-accept all"));
                 console.log(chalk.dim("To accept specific: /self-review-accept 1 3"));
-                ctx.agent.__pendingReview = report;
+                if (ctx.reviewRef)
+                    ctx.reviewRef.current = report;
             }
             catch (e) {
                 console.log(chalk.red(`/self-review failed: ${e?.message ?? e}`));
@@ -471,7 +473,7 @@ export const builtinCommands = [
         name: "self-review-accept",
         description: "Apply proposals from the most recent /self-review. Args: 'all' or numbers like '1 3'",
         run(args, ctx) {
-            const report = ctx.agent.__pendingReview;
+            const report = ctx.reviewRef?.current;
             if (!report || !Array.isArray(report.proposals) || report.proposals.length === 0) {
                 console.log(chalk.red("no pending proposals — run /self-review first"));
                 return;
@@ -495,7 +497,9 @@ export const builtinCommands = [
                 const file = applyProposal(ctx.config, report.proposals[i]);
                 console.log(chalk.dim(`saved ${file}`));
             }
-            ctx.agent.__pendingReview = null;
+            ctx.agent.refreshSystemPrompt();
+            if (ctx.reviewRef)
+                ctx.reviewRef.current = undefined;
         },
     },
     {
@@ -570,6 +574,14 @@ export const builtinCommands = [
                 }
                 const p = r.entry;
                 console.log(chalk.dim(`installed ${p.name} (${p.ref?.slice(0, 7) ?? "?"})  skills=${p.provides.skills.length} agents=${p.provides.agents.length} mcp=${p.provides.mcp.length}`));
+                // The `claw install` CLI warns about this; installing from the REPL
+                // used to say nothing, so the same action gave different consent
+                // guidance depending on how it was invoked.
+                if (p.provides.mcp.length > 0) {
+                    console.log(chalk.yellow(`⚠  ${p.name} ships ${p.provides.mcp.length} MCP server(s). They are NOT enabled.`));
+                    console.log(chalk.yellow("   MCP servers run arbitrary subprocesses in every project you open."));
+                    console.log(chalk.dim(`   Review them, then run: claw plugins trust ${p.name}`));
+                }
                 return;
             }
             if (sub === "remove") {

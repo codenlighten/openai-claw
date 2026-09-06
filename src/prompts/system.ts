@@ -4,6 +4,7 @@ import path from "node:path";
 import type { ClawConfig } from "../config.js";
 import type { Tool } from "../tools/types.js";
 import { listMemories } from "../memory/index.js";
+import { planModeExtra } from "../planmode.js";
 
 export interface SystemPromptOptions {
   config: ClawConfig;
@@ -32,6 +33,10 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
     `You are powered by OpenAI's '${config.model}' model.`,
   ].join("\n");
 
+  // Plan mode is a property of the current config, so it belongs in the prompt
+  // rather than as a pseudo-<system> user message that stays in the transcript
+  // after plan mode is switched off.
+  const planExtra = config.permissionMode === "plan" ? [planModeExtra()] : [];
   const memoryContext = loadMemoryContext(config);
   const claudeMd = loadProjectInstructions(config.workdir);
 
@@ -90,7 +95,7 @@ ${claudeMd ? `\n# Project instructions\n${claudeMd}` : ""}
 # Session
 ${volatileEnv}
 ${memoryContext ? `\n# Persistent memory\n${memoryContext}` : ""}
-${extras.length ? `\n${extras.join("\n")}` : ""}`;
+${[...planExtra, ...extras].length ? `\n${[...planExtra, ...extras].join("\n")}` : ""}`;
 
   if (variant === "subagent-general") {
     return `${base}\n\n# Subagent context\nYou are a subagent. Return a concise final summary of your findings. You will be invoked once with a self-contained prompt — there is no follow-up turn.`;

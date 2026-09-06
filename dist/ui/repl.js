@@ -26,6 +26,7 @@ export async function startRepl({ agent, config, permissions, sessionAttestor })
     let multilineBuffer = null;
     const hooks = new HookRunner(config);
     const sessionRef = {};
+    const reviewRef = {};
     await hooks.run("SessionStart", { workdir: config.workdir });
     banner(config);
     let aborter = null;
@@ -88,7 +89,14 @@ export async function startRepl({ agent, config, permissions, sessionAttestor })
                 console.log(chalk.red(`unknown command: /${head}`));
             }
             else {
-                await cmd.run(args, { agent, config, permissions, exit, sessionRef });
+                // A slash command that throws must not take the session down with it —
+                // `/remember project :: d :: b` (name omitted) was enough to do that.
+                try {
+                    await cmd.run(args, { agent, config, permissions, exit, sessionRef, reviewRef });
+                }
+                catch (e) {
+                    console.log(chalk.red(`/${head} failed: ${e?.message ?? e}`));
+                }
             }
             prompt();
             continue;

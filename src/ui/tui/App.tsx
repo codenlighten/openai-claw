@@ -75,6 +75,7 @@ export function App({ agent, config, permissions, hooks, sessionAttestor }: AppP
   }
 
   const sessionRef = useRef<{ current?: string }>({});
+  const reviewRef = useRef<{ current?: unknown }>({}).current;
 
   async function submit(text: string) {
     setInput("");
@@ -92,12 +93,18 @@ export function App({ agent, config, permissions, hooks, sessionAttestor }: AppP
       const buf: string[] = [];
       const original = console.log;
       console.log = (...a: any[]) => buf.push(a.map(String).join(" "));
+      let cmdError: string | null = null;
       try {
-        await cmd.run(args, { agent, config, permissions, exit, sessionRef: sessionRef.current });
+        await cmd.run(args, { agent, config, permissions, exit, sessionRef: sessionRef.current, reviewRef });
+      } catch (e: any) {
+        // try/finally without a catch restored console.log and then let the
+        // rejection escape the submit handler.
+        cmdError = `/${head} failed: ${e?.message ?? e}`;
       } finally {
         console.log = original;
       }
       if (buf.length) push({ kind: "system", id: nextId(), text: buf.join("\n") });
+      if (cmdError) push({ kind: "error", id: nextId(), text: cmdError });
       return;
     }
 

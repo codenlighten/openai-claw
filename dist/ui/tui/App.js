@@ -55,6 +55,7 @@ export function App({ agent, config, permissions, hooks, sessionAttestor }) {
         setHistory((h) => [...h, item]);
     }
     const sessionRef = useRef({});
+    const reviewRef = useRef({}).current;
     async function submit(text) {
         setInput("");
         if (!text.trim())
@@ -71,14 +72,22 @@ export function App({ agent, config, permissions, hooks, sessionAttestor }) {
             const buf = [];
             const original = console.log;
             console.log = (...a) => buf.push(a.map(String).join(" "));
+            let cmdError = null;
             try {
-                await cmd.run(args, { agent, config, permissions, exit, sessionRef: sessionRef.current });
+                await cmd.run(args, { agent, config, permissions, exit, sessionRef: sessionRef.current, reviewRef });
+            }
+            catch (e) {
+                // try/finally without a catch restored console.log and then let the
+                // rejection escape the submit handler.
+                cmdError = `/${head} failed: ${e?.message ?? e}`;
             }
             finally {
                 console.log = original;
             }
             if (buf.length)
                 push({ kind: "system", id: nextId(), text: buf.join("\n") });
+            if (cmdError)
+                push({ kind: "error", id: nextId(), text: cmdError });
             return;
         }
         if (text.startsWith("!")) {
