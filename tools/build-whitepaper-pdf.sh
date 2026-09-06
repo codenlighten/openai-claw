@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Render WHITEPAPER.md to whitepaper.pdf using pandoc + the Eisvogel template.
+# Render WHITEPAPER.md to whitepaper.pdf using pandoc and pdflatex.
 #
 # Requirements:
 #   - pandoc 3.x  (apt install pandoc, or via the bundled pypandoc-binary
@@ -7,7 +7,12 @@
 #                  install pypandoc-binary, then point $PANDOC at the binary
 #                  it installs)
 #   - pdflatex via TeX Live
-#   - tools/eisvogel.latex template, included in the repo
+#   - tools/whitepaper-header.tex, included in the repo
+#
+# This uses pandoc's default LaTeX template plus that header include. An earlier
+# version of this script refused to run without tools/eisvogel.latex, a template
+# it never actually passed to pandoc and which was never committed — so the
+# build failed on any fresh clone, including for the authors.
 #
 # Usage:
 #   tools/build-whitepaper-pdf.sh                 # default — use $PATH pandoc
@@ -19,11 +24,6 @@ PANDOC="${PANDOC:-pandoc}"
 if ! command -v "$PANDOC" >/dev/null 2>&1; then
   echo "error: pandoc not found at '$PANDOC'." >&2
   echo "       install with 'apt install pandoc' or set PANDOC to a binary." >&2
-  exit 1
-fi
-
-if [ ! -f tools/eisvogel.latex ]; then
-  echo "error: tools/eisvogel.latex missing." >&2
   exit 1
 fi
 
@@ -46,7 +46,7 @@ CITATION="G. J. Ward, B. W. Daugherty, S. M. Ryan"
   --variable=title:"No Trust in the Agent" \
   --variable=subtitle:"Cryptographic Audit Trails for AI Tool Use" \
   --variable=author:"$CITATION" \
-  --variable=date:"v1.0 — May 2026" \
+  --variable=date:"v1.0.1 — September 2026" \
   --variable=lang:en \
   --variable=geometry:margin=1in \
   --variable=fontsize:11pt \

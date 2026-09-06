@@ -2,13 +2,13 @@
 
 ### Cryptographic Audit Trails for AI Tool Use
 
-**v1.0 — May 2026**
+**v1.0.1 — September 2026** *(corrections to v1.0, May 2026; see Revision history)*
 
 **Gregory J. Ward** · CTO, SmartLedger.Technology · `greg@smartledger.technology`
 **Bryan W. Daugherty** · Co-founder, SmartLedger.Technology
 **Shawn M. Ryan** · Co-founder, SmartLedger.Technology
 
-*Reference implementation: `@smartledger.technology/openai-claw` v0.5.0 (npm). Verifier: `@smartledger.technology/openai-claw-verify` v0.2.0 (npm). Source: https://github.com/codenlighten/openai-claw.*
+*Reference implementation: `@smartledger.technology/openai-claw` v0.7.3 (npm). Verifier: `@smartledger.technology/openai-claw-verify` v0.5.0 (npm). Source: https://github.com/codenlighten/openai-claw.*
 
 *Cite as: G. J. Ward, B. W. Daugherty, S. M. Ryan, "No Trust in the Agent: Cryptographic Audit Trails for AI Tool Use", SmartLedger.Technology, May 2026.*
 
@@ -164,7 +164,7 @@ We deliberately sign the header, not each leaf. One signature per session is suf
 
 The header's sha256 hash is then submitted, optionally, to multiple OpenTimestamps calendars in parallel. Each calendar accepts the digest, batches it with thousands of other digests submitted in the same time window into a tree of its own, and commits the calendar's daily root to Bitcoin via a small OP_RETURN transaction. The calendar returns to the operator a *pending proof* — the operations chain that connects the operator's digest to the calendar's root — which is stored in the sidecar.
 
-Once the calendar's containing block is mined, the pending proof can be *upgraded* by re-querying the calendar for the merge-tree completion. The upgraded proof, when serialised into the standard OTS file format, can be handed to any third party who runs `ots verify` and gets back a Bitcoin block height and timestamp.
+Once the calendar's containing block is mined, the pending proof can be *upgraded* by re-querying the calendar for the merge-tree completion. The upgraded proof, when serialised into the standard OTS file format, can be handed to any third party who runs `ots verify -d <digest>` — the digest being `sha256` of the canonical JSON of the signed header, recorded as `anchor.digest` in the sidecar — and gets back a Bitcoin block height and timestamp. The digest is supplied explicitly because the timestamped message is a canonical serialisation, not a file on disk.
 
 ### 3.5 · Storage layout
 
@@ -450,8 +450,9 @@ cd openai-claw/examples/audit-demo
 1. `npm install @smartledger.technology/openai-claw-verify` (~11 kB)
 2. Loads `sample-session.attest.json` and `sample-session.json` from this repo
 3. Invokes `verifyAttestation()` and reports each cryptographic check (format, leaf continuity, Merkle root, signature, session alignment, anchor digest)
-4. If the `ots` CLI is installed, runs `ots info` on each committed `.ots` file and reports the pending attestation URLs
-5. Prints a one-line PASS or a detailed FAIL with reasons
+4. If the `ots` CLI is installed, runs `ots info` on each committed `.ots` file and reports the attestation URLs
+5. Runs `ots verify -d <digest>` on each proof against the digest recorded in the sidecar
+6. Prints a one-line PASS or a detailed FAIL with reasons
 
 No claw runtime is installed. No OpenAI account is needed. No SmartLedger service is contacted. The total time from `git clone` to verdict is under a minute.
 
@@ -494,7 +495,7 @@ The report distinguishes:
 - "absent" — the corresponding check did not apply (no anchor was submitted, no session file available)
 - "pending" — anchor accepted by calendar but Bitcoin not yet confirmed (typical for proofs less than 3 hours old)
 - "upgraded" — calendar batched into a Bitcoin transaction (after `ots upgrade`)
-- "verified" — the chain anchor checks out against the live Bitcoin chain (after `ots verify`)
+- "verified" — the chain anchor checks out against the live Bitcoin chain (after `ots verify -d <digest>`; reading the block back also needs a Bitcoin node)
 
 The trichotomy "pending / upgraded / verified" is the timescale of evidence: minutes after submission, hours after submission, durably for the lifetime of Bitcoin.
 
@@ -675,7 +676,12 @@ cd openai-claw/examples/audit-demo
 pipx install opentimestamps-client
 ots info proofs/sample-session.alice.ots
 ots upgrade proofs/sample-session.alice.ots   # after ~3 hours
-ots verify proofs/sample-session.alice.ots    # against the Bitcoin chain
+
+# The timestamped message is the canonical JSON of the signed header, which
+# never exists as a file, so the digest is passed explicitly. Without -d the
+# client looks for a target file and reports "Could not open target".
+DIGEST=$(jq -r .anchor.digest sample-session.attest.json)
+ots verify -d "$DIGEST" proofs/sample-session.alice.ots   # against the Bitcoin chain
 ```
 
 Expected output (truncated):
@@ -716,6 +722,30 @@ Expected output (truncated):
 13. **OWASP** — "MCP Security Cheat Sheet." OWASP Cheat Sheet Series. https://cheatsheetseries.owasp.org/cheatsheets/MCP_Security_Cheat_Sheet.html
 14. **Black Hills Information Security** — "Model Context Protocol (MCP)." https://www.blackhillsinfosec.com/model-context-protocol/
 15. **IT Pro** — "AI agents using Anthropic MCP could be a vector for supply chain attacks, claim researchers." https://www.itpro.com/security/ai-agents-using-anthropic-mcp-supply-chain-attacks-claim-researchers
+
+---
+
+## Revision history
+
+**v1.0.1 — September 2026.** Corrections only. No claim, argument, threat model
+or result of v1.0 is altered or withdrawn.
+
+1. **`ots verify` invocation corrected throughout.** v1.0 gave the command as
+   `ots verify <file>.ots`. That fails: the OpenTimestamps client infers a
+   target filename from the proof and reports `Could not open target`, because
+   what is timestamped here is the canonical JSON serialisation of the signed
+   attestation header, which never exists as a file. The correct form passes the
+   digest explicitly — `ots verify -d <digest> <file>.ots`, where the digest is
+   `anchor.digest` in the sidecar. Affected §3.4, §8.1, §8.3 and Appendix B. The proofs
+   themselves were always well-formed; only the instructions were wrong, and an
+   auditor following them would have concluded otherwise.
+2. **Reference implementation versions updated** in the front matter, from
+   claw v0.5.0 / verifier v0.2.0 to v0.7.3 / v0.5.0.
+3. **§8.1** now reflects that `verify.sh` verifies each proof against the
+   attested digest in addition to running `ots info`.
+
+The v1.0 text as signed in May 2026 remains available at git tag
+`whitepaper-v1.0`.
 
 ---
 
