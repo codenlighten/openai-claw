@@ -47,3 +47,19 @@ describe("loadEnvFiles", () => {
     expect(() => loadEnvFiles()).not.toThrow();
   });
 });
+
+describe("non-interactive invocation", () => {
+  const cli = path.join(process.cwd(), "dist", "index.js");
+
+  it("explains itself instead of throwing a React stack trace", async () => {
+    // ink puts stdin in raw mode; without a TTY it threw from inside a React
+    // effect, so `claw` in a pipeline printed a component stack and nothing
+    // about what to do instead.
+    const { spawnSync } = await import("node:child_process");
+    const r = spawnSync(process.execPath, [cli], { input: "", encoding: "utf8" });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("not a TTY");
+    expect(r.stderr).toContain("claw -p");
+    expect(r.stderr).not.toMatch(/Raw mode is not supported|react-reconciler/);
+  });
+});

@@ -201,6 +201,20 @@ async function main() {
     return;
   }
 
+  // Reaching here means no prompt was supplied. Both UIs need a terminal to
+  // read from — the TUI died with an unhandled ink "Raw mode is not supported"
+  // React stack trace, which tells a user nothing about what to do instead.
+  if (!process.stdin.isTTY) {
+    console.error(chalk.red("claw needs an interactive terminal, and stdin is not a TTY."));
+    console.error("");
+    console.error("For non-interactive use, give it a prompt:");
+    console.error(chalk.dim('  claw -p "your prompt"'));
+    console.error(chalk.dim('  echo "your prompt" | claw'));
+    console.error(chalk.dim("  claw -p \"$(cat prompt.txt)\""));
+    await disconnectAll();
+    process.exit(2);
+  }
+
   const { SessionAttestor } = await import("./attest/index.js");
   const sessionAttestor = new SessionAttestor(config, {
     resumed: !!argv.continue,
