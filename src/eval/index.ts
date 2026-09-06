@@ -40,6 +40,10 @@ export interface EvalExpectations {
   files_unchanged?: string[];
   /** Upper bound on model turns — catches thrashing that still lands correctly. */
   max_turns_used?: number;
+  /** At least one context compaction must have happened. */
+  compacted?: boolean;
+  /** At least one `warning` event must have been emitted (e.g. truncation). */
+  warned?: boolean;
 }
 
 export interface EvalCase {
@@ -68,6 +72,15 @@ export interface EvalCase {
   /** Answer the scripted prompter gives when permission is requested. Default "no". */
   promptAnswer?: "yes" | "no";
   /**
+   * Model-window knobs. Without these the suite could not reach compaction or
+   * truncation at all: sandboxes are tiny, so the real context window is never
+   * approached and the model is never cut off. Both are agent logic that
+   * otherwise only ever ran against mocks.
+   */
+  contextWindow?: number;
+  compactThreshold?: number;
+  maxTokens?: number;
+  /**
    * By default an `error` event fails the case: a 400 from a malformed
    * conversation, or hitting maxTurns, means the loop broke even if the files
    * happen to look right. Set true for cases that deliberately provoke one.
@@ -81,6 +94,8 @@ export interface EvalResult {
   turns: number;
   toolsUsed: string[];
   toolsDenied: string[];
+  compactions: number;
+  warnings: string[];
   durationMs: number;
   costUSD: number;
   totalTokens: number;
@@ -138,6 +153,8 @@ export function snapshotDir(dir: string): Record<string, string> {
 }
 
 export interface EvalObservation {
+  compactions: number;
+  warnings: string[];
   toolsUsed: string[];
   /** Tools whose call was refused by the permission layer. */
   toolsDenied: string[];
@@ -226,6 +243,12 @@ export function checkExpectations(
   if (expectations.max_turns_used !== undefined && obs.turns > expectations.max_turns_used) {
     failures.push(`took ${obs.turns} turns, expected at most ${expectations.max_turns_used}`);
   }
+  if (expectations.compacted && obs.compactions === 0) {
+    failures.push("expected the context to be compacted at least once, but it never was");
+  }
+  if (expectations.warned && obs.warnings.length === 0) {
+    failures.push("expected a warning event, but none was emitted");
+  }
   return failures;
 }
 
@@ -236,6 +259,8 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
   const errors: string[] = [];
   const toolsUsed = new Set<string>();
   const toolsDenied = new Set<string>();
+  const warnings: string[] = [];
+  let compactions = 0;
   let turns = 0;
   const start = Date.now();
   try {
@@ -267,6 +292,9 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
       maxTurns: c.maxTurns ?? 30,
       allowedTools: c.allowedTools ?? [],
       deniedTools: c.deniedTools ?? [],
+      ...(c.contextWindow !== undefined ? { contextWindow: c.contextWindow } : {}),
+      ...(c.compactThreshold !== undefined ? { compactThreshold: c.compactThreshold } : {}),
+      ...(c.maxTokens !== undefined ? { maxTokens: c.maxTokens } : {}),
     });
     const tools = getAllTools(config);
     // Scripted prompter: evals never have a human, and a case that exercises a
@@ -290,6 +318,11 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
         }
         if (evt.type === "usage") turns++;
         if (evt.type === "error") errors.push(String(evt.data));
+        if (evt.type === "warning") warnings.push(String(evt.data));
+        if (evt.type === "compaction") {
+          const d = evt.data as { skipped?: string };
+          if (!d?.skipped) compactions++;
+        }
         if (evt.type === "tool_result") {
           const d = evt.data as { name: string; content: string; isError?: boolean };
           if (d.isError && d.content.startsWith(`Permission denied for ${d.name}`)) {
@@ -308,7 +341,15 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
       ...checkExpectations(
         sandbox,
         c.expect,
-        { toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied), turns, errors, before },
+        {
+          toolsUsed: Array.from(toolsUsed),
+          toolsDenied: Array.from(toolsDenied),
+          compactions,
+          warnings,
+          turns,
+          errors,
+          before,
+        },
         c.allow_errors
       )
     );
@@ -331,6 +372,8 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
       turns,
       toolsUsed: Array.from(toolsUsed),
       toolsDenied: Array.from(toolsDenied),
+      compactions,
+      warnings,
       durationMs: Date.now() - start,
       costUSD,
       totalTokens,

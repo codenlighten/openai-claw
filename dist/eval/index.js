@@ -134,6 +134,12 @@ export function checkExpectations(sandbox, expectations = {}, obs, allowErrors =
     if (expectations.max_turns_used !== undefined && obs.turns > expectations.max_turns_used) {
         failures.push(`took ${obs.turns} turns, expected at most ${expectations.max_turns_used}`);
     }
+    if (expectations.compacted && obs.compactions === 0) {
+        failures.push("expected the context to be compacted at least once, but it never was");
+    }
+    if (expectations.warned && obs.warnings.length === 0) {
+        failures.push("expected a warning event, but none was emitted");
+    }
     return failures;
 }
 async function runOne(c) {
@@ -143,6 +149,8 @@ async function runOne(c) {
     const errors = [];
     const toolsUsed = new Set();
     const toolsDenied = new Set();
+    const warnings = [];
+    let compactions = 0;
     let turns = 0;
     const start = Date.now();
     try {
@@ -171,6 +179,9 @@ async function runOne(c) {
             maxTurns: c.maxTurns ?? 30,
             allowedTools: c.allowedTools ?? [],
             deniedTools: c.deniedTools ?? [],
+            ...(c.contextWindow !== undefined ? { contextWindow: c.contextWindow } : {}),
+            ...(c.compactThreshold !== undefined ? { compactThreshold: c.compactThreshold } : {}),
+            ...(c.maxTokens !== undefined ? { maxTokens: c.maxTokens } : {}),
         });
         const tools = getAllTools(config);
         // Scripted prompter: evals never have a human, and a case that exercises a
@@ -196,6 +207,13 @@ async function runOne(c) {
                     turns++;
                 if (evt.type === "error")
                     errors.push(String(evt.data));
+                if (evt.type === "warning")
+                    warnings.push(String(evt.data));
+                if (evt.type === "compaction") {
+                    const d = evt.data;
+                    if (!d?.skipped)
+                        compactions++;
+                }
                 if (evt.type === "tool_result") {
                     const d = evt.data;
                     if (d.isError && d.content.startsWith(`Permission denied for ${d.name}`)) {
@@ -210,7 +228,15 @@ async function runOne(c) {
         if (controller.signal.aborted) {
             failures.push(`timed out after ${timeoutMs}ms (${turns} turn(s) completed)`);
         }
-        failures.push(...checkExpectations(sandbox, c.expect, { toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied), turns, errors, before }, c.allow_errors));
+        failures.push(...checkExpectations(sandbox, c.expect, {
+            toolsUsed: Array.from(toolsUsed),
+            toolsDenied: Array.from(toolsDenied),
+            compactions,
+            warnings,
+            turns,
+            errors,
+            before,
+        }, c.allow_errors));
         return finalize(agent.usage.totalCostUSD, agent.usage.totalTokens);
     }
     catch (e) {
@@ -236,6 +262,8 @@ async function runOne(c) {
             turns,
             toolsUsed: Array.from(toolsUsed),
             toolsDenied: Array.from(toolsDenied),
+            compactions,
+            warnings,
             durationMs: Date.now() - start,
             costUSD,
             totalTokens,

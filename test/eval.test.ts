@@ -54,6 +54,16 @@ describe("eval case library", () => {
     expect(cases.length).toBeGreaterThanOrEqual(12);
   });
 
+  it("reaches the agent logic that only mocks had exercised", () => {
+    const ids = cases.map((c) => c.id);
+    // Compaction and truncation are unreachable without the window knobs, so
+    // both were mock-only until these cases existed.
+    expect(ids).toContain("compaction-survives");
+    expect(ids).toContain("truncation-is-surfaced");
+    expect(cases.find((c) => c.id === "compaction-survives")?.expect?.compacted).toBe(true);
+    expect(cases.find((c) => c.id === "truncation-is-surfaced")?.expect?.warned).toBe(true);
+  });
+
   it("every case has a unique id, a prompt and at least one expectation", () => {
     const ids = new Set<string>();
     for (const c of cases) {
@@ -106,6 +116,8 @@ describe("checkExpectations", () => {
   const obs = (over: Partial<EvalObservation> = {}): EvalObservation => ({
     toolsUsed: [],
     toolsDenied: [],
+    compactions: 0,
+    warnings: [],
     turns: 1,
     errors: [],
     before: {},

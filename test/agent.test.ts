@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -9,12 +9,19 @@ import type { CompletionResult, ChatMessage } from "../src/client.js";
 import type { Tool } from "../src/tools/types.js";
 import type { ClawConfig } from "../src/config.js";
 
+// An isolated tree per run. Pointing these at /tmp meant buildSystemPrompt
+// loaded whatever .md files happened to be lying there as "memories", so the
+// system prompt — and therefore every token estimate derived from it — varied
+// with the state of the machine.
+const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "claw-agent-test-"));
+afterAll(() => fs.rmSync(isolated, { recursive: true, force: true }));
+
 function cfg(overrides: Partial<ClawConfig> = {}): ClawConfig {
   return {
-    workdir: "/tmp",
-    homeDir: "/tmp",
-    projectDir: "/tmp",
-    memoryDir: "/tmp",
+    workdir: isolated,
+    homeDir: isolated,
+    projectDir: isolated,
+    memoryDir: path.join(isolated, "memory"),
     model: "test",
     apiKey: "x",
     allowedTools: [],
@@ -1129,5 +1136,80 @@ describe("abort", () => {
     await agent.run(handler, controller.signal);
     expect(calls).toBe(0);
     expect(events.some((e) => e.type === "error")).toBe(true);
+  });
+});
+
+describe("compaction failure handling", () => {
+  const longHistory = (): ChatMessage[] =>
+    Array.from({ length: 14 }, (_, i) =>
+      i % 2 === 0
+        ? ({ role: "user", content: `turn ${i}` } as ChatMessage)
+        : ({ role: "assistant", content: `reply ${i}` } as ChatMessage)
+    );
+
+  it("an aborted compaction ends the run cleanly instead of throwing", async () => {
+    // Passing the abort signal into compaction made it able to reject; nothing
+    // caught it, so the rejection escaped agent.run past the error event.
+    const controller = new AbortController();
+    const client: AgentClient = {
+      async complete(_msgs, _tools, opts) {
+        if (opts?.abortSignal?.aborted) throw new Error("Request aborted.");
+        controller.abort();
+        throw new Error("Request aborted.");
+      },
+    };
+    const agent = new Agent({
+      config: cfg({ contextWindow: 100, compactThreshold: 0.1 }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.replaceConversation(longHistory());
+    agent.pushUser("go");
+    const { events, handler } = collect();
+    await expect(agent.run(handler, controller.signal)).resolves.toBeUndefined();
+    expect(events.some((e) => e.type === "error")).toBe(true);
+  });
+
+  it("a failed compaction does not lose the turn", async () => {
+    let call = 0;
+    const client: AgentClient = {
+      async complete() {
+        call++;
+        if (call === 1) throw new Error("summarizer unavailable");
+        return textOnly("answered anyway");
+      },
+    };
+    const agent = new Agent({
+      config: cfg({ contextWindow: 100, compactThreshold: 0.1 }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client,
+    });
+    agent.replaceConversation(longHistory());
+    agent.pushUser("go");
+    const { events, handler } = collect();
+    await agent.run(handler);
+    const skipped = events.find((e) => e.type === "compaction" && e.data?.skipped);
+    expect(String(skipped?.data.skipped)).toContain("summarizer unavailable");
+    expect(events.some((e) => e.type === "text" && e.data === "answered anyway")).toBe(true);
+  });
+
+  it("a throwing PreCompact hook does not take the run down", async () => {
+    const agent = new Agent({
+      config: cfg({ contextWindow: 100, compactThreshold: 0.1 }),
+      tools: [],
+      permissionCheck: async () => ({ allow: true }),
+      client: new ScriptedClient([textOnly("SUMMARY"), textOnly("done")]),
+      runHook: async () => {
+        throw new Error("hook exploded");
+      },
+    });
+    agent.replaceConversation(longHistory());
+    agent.pushUser("go");
+    const { events, handler } = collect();
+    await agent.run(handler);
+    expect(events.some((e) => e.type === "compaction" && /hook exploded/.test(String(e.data?.skipped)))).toBe(true);
+    expect(events.some((e) => e.type === "done")).toBe(true);
   });
 });

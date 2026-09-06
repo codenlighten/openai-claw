@@ -1,0 +1,27 @@
+{
+  "id": "compaction-survives",
+  "description": "Forces at least one real compaction mid-task, then checks the agent still finishes correctly. Compaction is the least-tested agent logic there is \u2014 every unit test for it uses a scripted client, so nothing has ever confirmed the summary it writes is usable by a real model. The task deliberately needs a fact stated at the very start, after many turns have pushed it out of the retained window.",
+  "setup": [
+    "for i in $(seq 1 8); do printf 'export const value%s = %s;\\n' \"$i\" \"$i\" > \"mod$i.js\"; done"
+  ],
+  "prompt": "Remember this and use it at the end: the project codename is BLUEHERON. Now read every mod*.js file one at a time, in order, and tell me the value each exports. When you have read all eight, create a file called codename.txt whose only content is the project codename I gave you at the start.",
+  "contextWindow": 6000,
+  "compactThreshold": 0.5,
+  "expect": {
+    "compacted": true,
+    "files_exist": [
+      "codename.txt"
+    ],
+    "file_matches": [
+      {
+        "path": "codename.txt",
+        "pattern": "BLUEHERON"
+      }
+    ],
+    "tools_used": [
+      "Read"
+    ]
+  },
+  "maxTurns": 40,
+  "timeoutMs": 420000
+}

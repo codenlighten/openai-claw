@@ -254,7 +254,14 @@ export class Agent {
     /** Force a compaction pass right now, regardless of threshold. Returns [before, after] tokens or null. */
     async forceCompact() {
         const before = this.lastPromptTokens ?? estimateTokens(this.messages);
-        const compacted = await compactIfNeeded(this.messages, this.opts.config, this.client, true, this.lastPromptTokens);
+        let compacted = null;
+        try {
+            compacted = await compactIfNeeded(this.messages, this.opts.config, this.client, true, this.lastPromptTokens);
+        }
+        catch {
+            // /compact reports "nothing to compact" rather than throwing at the UI.
+            return null;
+        }
         if (!compacted)
             return null;
         this.messages = compacted;
@@ -297,21 +304,40 @@ export class Agent {
             // Compact context if approaching limit. PreCompact hook may veto.
             const before = this.lastPromptTokens ?? estimateTokens(this.messages);
             if (this.opts.runHook) {
-                const outcomes = await this.opts.runHook("PreCompact", {
-                    tokens: before,
-                    limit: Math.floor(this.opts.config.contextWindow * this.opts.config.compactThreshold),
-                });
-                const blocked = outcomes.some((o) => o.blocked);
-                if (blocked) {
-                    handler({ type: "compaction", data: { skipped: "blocked by PreCompact hook" } });
+                // Same hardening as the tool-use hooks: a throwing hook must not take
+                // the run down.
+                try {
+                    const outcomes = await this.opts.runHook("PreCompact", {
+                        tokens: before,
+                        limit: Math.floor(this.opts.config.contextWindow * this.opts.config.compactThreshold),
+                    });
+                    const blocked = outcomes.some((o) => o.blocked);
+                    if (blocked) {
+                        handler({ type: "compaction", data: { skipped: "blocked by PreCompact hook" } });
+                    }
+                }
+                catch (e) {
+                    handler({ type: "compaction", data: { skipped: `PreCompact hook crashed: ${e?.message ?? e}` } });
                 }
             }
-            const compacted = await compactIfNeeded(this.messages, this.opts.config, this.client, false, this.lastPromptTokens, abortSignal);
-            if (compacted) {
-                const after = estimateTokens(compacted);
-                this.messages = compacted;
-                this.lastPromptTokens = undefined;
-                handler({ type: "compaction", data: { beforeTokens: before, afterTokens: after } });
+            // Compaction is a model call, so it can be aborted or simply fail. An
+            // abort is the caller stopping the run; anything else is not worth losing
+            // the turn over, since the request may still fit unsummarized.
+            try {
+                const compacted = await compactIfNeeded(this.messages, this.opts.config, this.client, false, this.lastPromptTokens, abortSignal);
+                if (compacted) {
+                    const after = estimateTokens(compacted);
+                    this.messages = compacted;
+                    this.lastPromptTokens = undefined;
+                    handler({ type: "compaction", data: { beforeTokens: before, afterTokens: after } });
+                }
+            }
+            catch (e) {
+                if (abortSignal?.aborted) {
+                    handler({ type: "error", data: "aborted" });
+                    return;
+                }
+                handler({ type: "compaction", data: { skipped: `compaction failed: ${e?.message ?? e}` } });
             }
             if (abortSignal?.aborted) {
                 handler({ type: "error", data: "aborted" });
