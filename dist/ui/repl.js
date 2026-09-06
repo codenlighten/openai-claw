@@ -40,20 +40,33 @@ export async function startRepl({ agent, config, permissions, sessionAttestor })
             process.exit(0);
         });
     };
+    // A single listener with an explicit window. The previous version registered
+    // a fresh `once` listener and a timer on every press — so repeated Ctrl-C
+    // accumulated both — and only honoured the second press within one second,
+    // while telling the user "press Ctrl-C again" with no mention of a deadline.
+    let quitArmed = false;
+    let quitTimer = null;
     rl.on("SIGINT", () => {
         if (aborter) {
             aborter.abort();
             console.log(chalk.yellow("\n[aborted]"));
+            return;
         }
-        else {
-            console.log(chalk.dim("\n(press Ctrl-C again or type /exit to quit)"));
-            let next = false;
-            rl.once("SIGINT", () => {
-                if (!next)
-                    exit();
-            });
-            setTimeout(() => (next = true), 1000);
+        if (quitArmed) {
+            if (quitTimer)
+                clearTimeout(quitTimer);
+            exit();
+            return;
         }
+        quitArmed = true;
+        console.log(chalk.dim("\n(press Ctrl-C again within 3s, or type /exit, to quit)"));
+        if (quitTimer)
+            clearTimeout(quitTimer);
+        quitTimer = setTimeout(() => {
+            quitArmed = false;
+            quitTimer = null;
+        }, 3000);
+        quitTimer.unref?.();
     });
     const prompt = () => {
         rl.setPrompt(chalk.cyan("> "));
