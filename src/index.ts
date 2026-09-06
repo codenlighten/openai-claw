@@ -1,27 +1,16 @@
 #!/usr/bin/env node
-import dotenv from "dotenv";
+import { loadEnvFiles } from "./env.js";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import chalk from "chalk";
 import { loadConfig } from "./config.js";
 
-// Load .env files before anything else reads process.env.
-// Order (later wins): bundled project .env, ~/.openai-claw/.env, cwd .env, cwd .env.local.
-const here = path.dirname(new URL(import.meta.url).pathname);
-const projectRoot = path.resolve(here, "..");
-const cwd = process.cwd();
-const userHomeEnv = path.join(process.env.HOME ?? "", ".openai-claw", ".env");
-const envCandidates = [
-  path.join(projectRoot, ".env"),
-  path.join(projectRoot, ".env.local"),
-  userHomeEnv,
-  ...(cwd !== projectRoot ? [path.join(cwd, ".env"), path.join(cwd, ".env.local")] : []),
-];
-for (const file of envCandidates) {
-  if (fs.existsSync(file)) dotenv.config({ path: file, override: false });
-}
+loadEnvFiles();
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 import { Agent } from "./agent.js";
 import { getAllTools } from "./tools/index.js";
 import { PermissionManager } from "./permissions/index.js";
@@ -108,6 +97,7 @@ async function main() {
   }
 
   const trust = await resolveProjectTrust(config, { interactive: !!process.stdin.isTTY });
+  config.trustProjectDefinitions = trust.trustDefinitions;
   const mcpSpecs = loadMcpServerSpecs(config, { includeProject: trust.trustMcp });
   const mcpTools = mcpSpecs.length > 0 ? await startMcpServers(mcpSpecs) : [];
   if (mcpTools.length > 0) {
@@ -126,8 +116,8 @@ async function main() {
   const agent = new Agent({
     config,
     tools,
-    permissionCheck: (tool, input) => permissions.check(tool, input),
-    spawnSubagent: (req) => runSubagent(config, (t, i) => permissions.check(t, i), req),
+    permissionCheck: (tool, input, meta) => permissions.check(tool, input, meta),
+    spawnSubagent: (req, signal) => runSubagent(config, (t, i, m) => permissions.check(t, i, m), req, undefined, signal),
     runHook: (event, payload) => hookRunner.run(event, payload),
     systemPromptExtras,
   });
@@ -168,7 +158,13 @@ async function main() {
     attestor.recordMcpServers(getConnectedServers(), trust.trustMcp);
     attestor.recordUserPrompt(promptArg);
 
-    agent.pushUser(prepareUserMessage(promptArg, config).content);
+    const prepared = prepareUserMessage(promptArg, config);
+    // The TUI lists what an @ref pulled in; one-shot dropped it, so a path in
+    // pasted text could inline a file into the prompt with nothing shown.
+    for (const a of prepared.attachments) {
+      process.stderr.write(chalk.dim(`[attached] ${a}`) + "\n");
+    }
+    agent.pushUser(prepared.content);
     await agent.run((evt) => {
       attestor.onAgentEvent(evt);
       if (evt.type === "text_delta") process.stdout.write(evt.data as string);
@@ -179,6 +175,9 @@ async function main() {
       if (evt.type === "tool_result") {
         const d = evt.data as { content: string; isError?: boolean };
         if (d.isError) process.stderr.write(chalk.red(d.content.slice(0, 4000)) + "\n");
+      }
+      if (evt.type === "warning") {
+        process.stderr.write(chalk.yellow(`! ${evt.data}`) + "\n");
       }
       if (evt.type === "error") {
         process.stderr.write(chalk.red(String(evt.data)) + "\n");
@@ -227,7 +226,8 @@ function readStdinToEnd(): Promise<string> {
 
 async function runPluginCli(args: string[]): Promise<void> {
   const config = loadConfig();
-  const { installPlugin, removePlugin, listInstalled, searchRegistry } = await import("./plugins/index.js");
+  const { installPlugin, removePlugin, listInstalled, searchRegistry, enablePluginMcp, disablePluginMcp, pluginMcpServers } =
+    await import("./plugins/index.js");
   const [cmd, ...rest] = args;
   if (cmd === "install") {
     const src = rest[0];
@@ -247,6 +247,17 @@ async function runPluginCli(args: string[]): Promise<void> {
         `installed ${p.name} (${p.ref?.slice(0, 7) ?? "?"})  skills=${p.provides.skills.length} agents=${p.provides.agents.length} mcp=${p.provides.mcp.length}`
       )
     );
+    if (p.provides.mcp.length > 0) {
+      const servers = pluginMcpServers(config, p.name);
+      console.error("");
+      console.error(chalk.yellow(`⚠  ${p.name} ships ${p.provides.mcp.length} MCP server(s). They are NOT enabled.`));
+      console.error(chalk.yellow("   MCP servers run arbitrary subprocesses in every project you open."));
+      for (const [name, cfg] of Object.entries<any>(servers)) {
+        const how = cfg?.type === "http" ? cfg.url : [cfg?.command, ...(cfg?.args ?? [])].filter(Boolean).join(" ");
+        console.error(`     · ${name}: ${chalk.dim(how)}`);
+      }
+      console.error(chalk.dim(`   Review them, then run: claw plugins trust ${p.name}`));
+    }
     return;
   }
   if (cmd === "uninstall") {
@@ -260,7 +271,14 @@ async function runPluginCli(args: string[]): Promise<void> {
   if (cmd === "plugins") {
     const sub = rest[0] ?? "list";
     if (sub === "list") {
-      for (const p of listInstalled(config)) console.log(`${p.name}\t${p.source}\t${p.ref ?? ""}`);
+      for (const p of listInstalled(config)) {
+        const mcp = p.provides.mcp.length
+          ? p.mcpEnabled
+            ? `mcp:${p.provides.mcp.length} (trusted)`
+            : `mcp:${p.provides.mcp.length} (not trusted)`
+          : "";
+        console.log(`${p.name}\t${p.source}\t${p.ref ?? ""}\t${mcp}`);
+      }
       return;
     }
     if (sub === "search") {
@@ -268,7 +286,16 @@ async function runPluginCli(args: string[]): Promise<void> {
       for (const h of searchRegistry(q)) console.log(`${h.name}\t${h.url}\t${h.description}`);
       return;
     }
-    console.error(chalk.red("usage: claw plugins [list|search <q>]"));
+    if (sub === "trust" || sub === "untrust") {
+      const name = rest[1];
+      if (!name) { console.error(chalk.red(`usage: claw plugins ${sub} <name>`)); process.exit(2); }
+      const r = sub === "trust" ? enablePluginMcp(config, name) : disablePluginMcp(config, name);
+      if (!r.ok) { console.error(chalk.red(r.error)); process.exit(1); }
+      const verb = sub === "trust" ? "enabled" : "disabled";
+      console.error(chalk.dim(`${verb} MCP server(s) for ${name}: ${r.servers.join(", ") || "(none)"}`));
+      return;
+    }
+    console.error(chalk.red("usage: claw plugins [list|search <q>|trust <name>|untrust <name>]"));
     process.exit(2);
   }
 }
@@ -353,15 +380,23 @@ async function runExportOts(config: any, args: string[]): Promise<void> {
   const sessionId = args.find((a) => !a.startsWith("--"));
   const outDirArg = args.find((a) => a.startsWith("--out="))?.split("=")[1];
   if (!sessionId) {
-    console.error(chalk.red('usage: claw attest export-ots <session-id> [--out=<dir>]'));
+    console.error(chalk.red('usage: claw attest export-ots <session-id-or-sidecar-path> [--out=<dir>]'));
     process.exit(2);
   }
   const { exportOtsFiles } = await import("./attest/index.js");
-  const sidecar = path.join(config.projectDir, "sessions", `${sessionId}.attest.json`);
+  // Accept a sidecar path as well as a bare session id, the way `audit verify`
+  // does — otherwise a sidecar that lives anywhere but this machine's project
+  // directory (a committed fixture, one handed to an auditor) cannot be
+  // exported at all.
+  const sidecar =
+    sessionId.endsWith(".attest.json") && fs.existsSync(sessionId)
+      ? sessionId
+      : path.join(config.projectDir, "sessions", `${sessionId}.attest.json`);
   if (!fs.existsSync(sidecar)) {
     console.error(chalk.red(`no sidecar at ${sidecar}`));
     process.exit(1);
   }
+  const outName = path.basename(sidecar).replace(/\.attest\.json$/, "");
   const attestation = JSON.parse(fs.readFileSync(sidecar, "utf8"));
   if (!attestation.anchor) {
     console.error(chalk.red("sidecar has no anchor — run `claw attest anchor` first"));
@@ -374,16 +409,28 @@ async function runExportOts(config: any, args: string[]): Promise<void> {
     console.error(chalk.yellow("anchor has no successful calendar responses — nothing to export"));
     process.exit(1);
   }
+  const written: string[] = [];
   for (const e of exports) {
-    const file = path.join(outDir, `${sessionId}.${e.shortName}.ots`);
+    const file = path.join(outDir, `${outName}.${e.shortName}.ots`);
     fs.writeFileSync(file, e.bytes);
+    written.push(file);
     console.log(`  ${chalk.green("✓")} ${file}  ${chalk.dim(`(${e.bytes.length} bytes, ${e.url})`)}`);
   }
   console.log("");
-  console.log(chalk.dim("Verify any of these with the standard `ots verify <file>.ots` tool"));
-  console.log(chalk.dim("(install: pip install opentimestamps-client). Pending proofs become"));
-  console.log(chalk.dim("Bitcoin-confirmed automatically within ~3 hours — re-run `ots upgrade`"));
-  console.log(chalk.dim("then `ots verify` to chase the chain anchor."));
+  // The timestamped message is the canonical JSON of the header, which never
+  // exists as a file. Bare `ots verify <file>.ots` therefore fails with
+  // "Could not open target" — it needs the digest passed explicitly.
+  console.log(chalk.bold("Verify with the standard OpenTimestamps client:"));
+  console.log(chalk.dim("  (install: pipx install opentimestamps-client)"));
+  console.log("");
+  for (const file of written) {
+    console.log(`  ots verify -d ${attestation.anchor.digest} ${file}`);
+  }
+  console.log("");
+  console.log(chalk.dim("The digest is sha256 of the canonical JSON of the signed header — there is"));
+  console.log(chalk.dim("no target file to point at, so -d is required. Pending proofs become"));
+  console.log(chalk.dim("Bitcoin-confirmed within ~3 hours; run `ots upgrade <file>.ots` first to"));
+  console.log(chalk.dim("fetch the completed proof. Confirming the block needs a Bitcoin node."));
 }
 
 async function runAnchor(config: any, args: string[]): Promise<void> {
@@ -478,7 +525,7 @@ async function runVerifyCli(args: string[]): Promise<void> {
   }
   if (report.mcp) {
     console.log(
-      chalk.dim(`  mcp: ${report.mcp.serversSeen} server(s), ${report.mcp.toolCallsSignedWithProvenance} call(s) with provenance, ${report.mcp.toolCallsMissingProvenance} missing`)
+      chalk.dim(`  mcp: ${report.mcp.serversSeen} server(s), ${report.mcp.toolCallsSignedWithProvenance} call(s) with structural provenance, ${report.mcp.toolCallsMissingProvenance} missing`)
     );
   }
   for (const r of report.reasons) console.log(chalk.red(`  · ${r}`));
@@ -547,6 +594,9 @@ async function runAuditCli(args: string[]): Promise<void> {
   f("sessionAlignment     ", "sessionAlignment");
   f("anchorDigest         ", "anchorDigest");
   f("mcpProvenance        ", "mcpProvenance");
+  if (report.checks.mcpProvenance !== undefined) {
+    console.log(chalk.dim("      structural only — leaf kinds and ordering, not payload contents"));
+  }
   console.log("");
   console.log(chalk.bold("  Identity"));
   console.log(`    publicKeyId:      ${header.publicKeyId}`);
@@ -591,10 +641,19 @@ async function runAuditCli(args: string[]): Promise<void> {
   if (report.ok) {
     console.log(chalk.bold(labelGreen("  Result")));
     console.log(labelGreen("    ✓ Claw-side audit trail is valid"));
+    if (!sessionFile || !fs.existsSync(sessionFile)) {
+      console.log(
+        chalk.yellow("    ! transcript not checked — the signature covers the leaf hashes, not the session text")
+      );
+    }
     if (proofFiles.length > 0) {
       console.log(labelGreen("    ✓ OpenTimestamps proofs are well-formed"));
-      console.log(chalk.dim("      Run `ots upgrade <file>.ots && ots verify <file>.ots` once Bitcoin"));
-      console.log(chalk.dim("      has confirmed the calendar's batch (~3 hours after submission)."));
+      if (attestation.anchor?.digest) {
+        console.log(chalk.dim("      Chase the chain anchor with the standard client — the timestamped"));
+        console.log(chalk.dim("      message is the header's canonical JSON, so -d is required:"));
+        console.log(chalk.dim(`        ots upgrade ${path.join(proofsDir, path.basename(proofFiles[0]))}`));
+        console.log(chalk.dim(`        ots verify -d ${attestation.anchor.digest} ${path.join(proofsDir, path.basename(proofFiles[0]))}`));
+      }
     }
   } else {
     console.log(chalk.bold(labelRed("  Result")));
@@ -635,6 +694,7 @@ async function runMcpCli(args: string[]): Promise<void> {
   if (!sub || sub === "list") {
     const config = loadConfig();
     const trust = await resolveProjectTrust(config, { interactive: false });
+    config.trustProjectDefinitions = trust.trustDefinitions;
     const specs = loadMcpServerSpecs(config, { includeProject: trust.trustMcp });
     if (specs.length === 0) {
       console.log(chalk.dim("no MCP servers configured for this project"));

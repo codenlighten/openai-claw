@@ -12,3 +12,8 @@ STATUS.md
 # Scratch/probe scripts — not for the repo.
 scratch/
 
+# Ad-hoc review/transcript dumps — not for the repo.
+review.md
+
+# Per-run eval output, not a source artifact.
+test/eval-report.json

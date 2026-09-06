@@ -15,7 +15,6 @@ import { buildIndex, loadIndex, semanticSearch } from "../rag/index.js";
 import { runSelfReview, applyProposal } from "../self-review/index.js";
 import { installPlugin, removePlugin, listInstalled, searchRegistry } from "../plugins/index.js";
 import { prepareUserMessage } from "../input.js";
-import { HookRunner } from "../hooks/index.js";
 import { spawnSync } from "node:child_process";
 
 export interface CommandContext {
@@ -25,6 +24,8 @@ export interface CommandContext {
   exit: () => void;
   /** Mutable holder for the current session id. Set after first save. */
   sessionRef?: { current?: string };
+  /** Mutable holder for the last /self-review report, consumed by /self-review-accept. */
+  reviewRef?: { current?: unknown };
 }
 
 export interface SlashCommand {
@@ -130,13 +131,17 @@ export const builtinCommands: SlashCommand[] = [
     description: "Toggle plan mode",
     run(_args, ctx) {
       const enabled = ctx.config.permissionMode !== "plan";
-      setPlanMode(ctx.config, enabled);
-      if (enabled) {
-        ctx.agent.pushUser(`<system>${planModeExtra()}</system>`);
-        console.log(chalk.cyan("plan mode ON — read-only investigation, no mutations"));
-      } else {
-        console.log(chalk.cyan("plan mode OFF"));
-      }
+      setPlanMode(ctx.config, enabled, ctx.permissions.mode);
+      // The directive lives in the system prompt, so switching plan mode off
+      // removes it. It used to be pushed as a <system>-tagged user message that
+      // stayed in the transcript forever, telling the model it was still in
+      // plan mode long after it had left.
+      ctx.agent.refreshSystemPrompt();
+      console.log(
+        enabled
+          ? chalk.cyan("plan mode ON — read-only investigation, no mutations")
+          : chalk.cyan(`plan mode OFF (permission mode: ${ctx.config.permissionMode})`)
+      );
     },
   },
   {
@@ -195,6 +200,7 @@ export const builtinCommands: SlashCommand[] = [
       }
       if (sub === "rm") {
         const ok = deleteMemory(ctx.config, rest.join(" "));
+        if (ok) ctx.agent.refreshSystemPrompt();
         console.log(ok ? chalk.dim("deleted") : chalk.red("not found"));
         return;
       }
@@ -216,14 +222,22 @@ export const builtinCommands: SlashCommand[] = [
         console.log(chalk.red(`unknown type: ${type}`));
         return;
       }
-      const name = nameParts.join("-").toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      const name = nameParts.join("-").toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
+      if (!name) {
+        console.log(chalk.red("usage: /remember <type> <name> :: <description> :: <body>  (the name is missing)"));
+        return;
+      }
       const file = writeMemory(ctx.config, {
         name,
         description,
         type: type as any,
         body,
       });
-      console.log(chalk.dim(`saved ${file}`));
+      // Memory lives in the system prompt, which is otherwise built once at
+      // startup — without this the new memory would not reach the model until
+      // the next session.
+      ctx.agent.refreshSystemPrompt();
+      console.log(chalk.dim(`saved ${file} (active from the next turn)`));
     },
   },
   {
@@ -239,7 +253,8 @@ export const builtinCommands: SlashCommand[] = [
         file,
         `# Project instructions for openai-claw\n\n_(Describe the project, conventions, and anything the assistant should know about working here.)_\n`
       );
-      console.log(chalk.dim(`created ${file}`));
+      ctx.agent.refreshSystemPrompt();
+      console.log(chalk.dim(`created ${file} (loaded into the system prompt)`));
     },
   },
   {
@@ -383,8 +398,6 @@ export const builtinCommands: SlashCommand[] = [
     name: "hooks",
     description: "List configured hooks",
     run(_args, ctx) {
-      const hooks = new HookRunner(ctx.config);
-      // HookRunner stores hooks privately; reflect via a probe by reading settings.
       const userSettings = readJsonOr(path.join(ctx.config.homeDir, "settings.json"), {});
       const projSettings = readJsonOr(path.join(ctx.config.workdir, ".claw", "settings.json"), {});
       const all = [...(userSettings.hooks ? entriesOf(userSettings.hooks) : []), ...(projSettings.hooks ? entriesOf(projSettings.hooks) : [])];
@@ -397,7 +410,6 @@ export const builtinCommands: SlashCommand[] = [
           console.log(`  [${event}] ${d.matcher ? `matcher=${d.matcher} ` : ""}${d.command}`);
         }
       }
-      void hooks;
     },
   },
   {
@@ -444,7 +456,8 @@ export const builtinCommands: SlashCommand[] = [
       console.log(chalk.dim("indexing… this may take a moment"));
       try {
         const r = await buildIndex(ctx.config, (msg) => console.log(chalk.dim(`  ${msg}`)));
-        console.log(chalk.dim(`indexed ${r.filesIndexed} file(s) → ${r.chunks} chunk(s)`));
+        const reused = r.reusedChunks > 0 ? ` (${r.reusedChunks} reused, ${r.chunks - r.reusedChunks} newly embedded)` : "";
+        console.log(chalk.dim(`indexed ${r.filesIndexed} file(s) → ${r.chunks} chunk(s)${reused}`));
       } catch (e: any) {
         console.log(chalk.red(`index failed: ${e?.message ?? e}`));
       }
@@ -474,7 +487,7 @@ export const builtinCommands: SlashCommand[] = [
         }
         console.log(chalk.dim("\nTo accept all: /self-review-accept all"));
         console.log(chalk.dim("To accept specific: /self-review-accept 1 3"));
-        (ctx.agent as any).__pendingReview = report;
+        if (ctx.reviewRef) ctx.reviewRef.current = report;
       } catch (e: any) {
         console.log(chalk.red(`/self-review failed: ${e?.message ?? e}`));
       }
@@ -484,7 +497,7 @@ export const builtinCommands: SlashCommand[] = [
     name: "self-review-accept",
     description: "Apply proposals from the most recent /self-review. Args: 'all' or numbers like '1 3'",
     run(args, ctx) {
-      const report = (ctx.agent as any).__pendingReview;
+      const report = ctx.reviewRef?.current as { proposals?: any[] } | undefined;
       if (!report || !Array.isArray(report.proposals) || report.proposals.length === 0) {
         console.log(chalk.red("no pending proposals — run /self-review first"));
         return;
@@ -492,22 +505,23 @@ export const builtinCommands: SlashCommand[] = [
       const want = args.trim();
       let indices: number[];
       if (want === "all") {
-        indices = report.proposals.map((_: unknown, i: number) => i);
+        indices = report.proposals!.map((_: unknown, i: number) => i);
       } else {
         indices = want
           .split(/\s+/)
           .map((s) => parseInt(s, 10) - 1)
-          .filter((n) => Number.isFinite(n) && n >= 0 && n < report.proposals.length);
+          .filter((n) => Number.isFinite(n) && n >= 0 && n < report.proposals!.length);
       }
       if (indices.length === 0) {
         console.log(chalk.red("usage: /self-review-accept all | <1-based indices...>"));
         return;
       }
       for (const i of indices) {
-        const file = applyProposal(ctx.config, report.proposals[i]);
+        const file = applyProposal(ctx.config, report.proposals![i]);
         console.log(chalk.dim(`saved ${file}`));
       }
-      (ctx.agent as any).__pendingReview = null;
+      ctx.agent.refreshSystemPrompt();
+      if (ctx.reviewRef) ctx.reviewRef.current = undefined;
     },
   },
   {
@@ -584,6 +598,14 @@ export const builtinCommands: SlashCommand[] = [
             `installed ${p.name} (${p.ref?.slice(0, 7) ?? "?"})  skills=${p.provides.skills.length} agents=${p.provides.agents.length} mcp=${p.provides.mcp.length}`
           )
         );
+        // The `claw install` CLI warns about this; installing from the REPL
+        // used to say nothing, so the same action gave different consent
+        // guidance depending on how it was invoked.
+        if (p.provides.mcp.length > 0) {
+          console.log(chalk.yellow(`⚠  ${p.name} ships ${p.provides.mcp.length} MCP server(s). They are NOT enabled.`));
+          console.log(chalk.yellow("   MCP servers run arbitrary subprocesses in every project you open."));
+          console.log(chalk.dim(`   Review them, then run: claw plugins trust ${p.name}`));
+        }
         return;
       }
       if (sub === "remove") {

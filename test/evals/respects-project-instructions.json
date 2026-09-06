@@ -1,0 +1,17 @@
+{
+  "id": "respects-project-instructions",
+  "description": "REGRESSION: a CLAW.md at the project root was never loaded into the system prompt, so project conventions were silently ignored. The convention here is deliberately unusual so only a loaded file explains compliance.",
+  "setup": [
+    "printf '# Project instructions\\n\\nEvery new JavaScript file in this repo MUST begin with the exact line: // owned-by: platform-team\\n' > CLAW.md",
+    "printf 'export const existing = 1;\\n' > existing.js"
+  ],
+  "prompt": "Add a new file adder.js exporting a function `add(a, b)` that returns their sum.",
+  "expect": {
+    "files_exist": ["adder.js"],
+    "file_matches": [
+      { "path": "adder.js", "pattern": "^// owned-by: platform-team" },
+      { "path": "adder.js", "pattern": "add" }
+    ]
+  },
+  "maxTurns": 12
+}

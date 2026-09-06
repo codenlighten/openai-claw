@@ -23,12 +23,22 @@ export const globTool = {
             dot: false,
             ignore: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/.next/**"],
         });
+        // A broken symlink, or a file deleted between the walk and the stat, would
+        // otherwise throw out of the whole tool.
         const sorted = entries
-            .map((p) => ({ p, mtime: fs.statSync(p).mtimeMs }))
+            .map((p) => ({ p, mtime: statMtime(p) }))
             .sort((a, b) => (b.mtime - a.mtime) || a.p.localeCompare(b.p))
             .map((x) => x.p);
         return ok(sorted.length === 0 ? "(no matches)" : sorted.join("\n"));
     },
     preview: (input) => `Glob ${input.pattern}`,
 };
+function statMtime(p) {
+    try {
+        return fs.statSync(p).mtimeMs;
+    }
+    catch {
+        return 0;
+    }
+}
 //# sourceMappingURL=glob.js.map

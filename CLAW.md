@@ -33,12 +33,15 @@ A TypeScript reimplementation of Anthropic's Claude Code, but powered by OpenAI'
 | Task | How |
 | --- | --- |
 | Add a new tool | New file in `src/tools/`, register in `src/tools/index.ts`. Set `needsPermission` and `mutates` honestly. |
+| Change how a tool's permission key is built | `describeKeys()` in `src/permissions/index.ts`. A key ending in `:*` is a REUSABLE prefix — only mint one when a single approval can safely stand for the whole class. |
 | Add a slash command | Append to `builtinCommands` in `src/commands/index.ts`. |
 | Add a hook event | Extend `HookEvent` union in `src/hooks/index.ts` and fire from wherever the event occurs. |
 | Update model pricing | `src/cost.ts` — keep `MODEL_PRICES` current. |
+| Change semantic-index chunking | `chunkText` in `src/rag/index.ts`, then `node tools/rag-bench.mjs` before and after. Bump `INDEX_VERSION` so existing indexes rebuild. Do not claim a retrieval improvement you have not measured — two plausible ones already failed to survive contact with the benchmark. |
 | Add a system-prompt directive | `src/prompts/system.ts`. |
-| Run tests | `npm test` |
-| Build | `npm run build` |
+| Run tests | `npm test` (claw) — the verify package has its own: `npm test -w @smartledger.technology/openai-claw-verify` |
+| Add an eval case | A JSON file in `test/evals/`. Shape is `EvalCase` in `src/eval/index.ts`; `test/eval.test.ts` verifies every case's `setup` runs and that its expectations reference real files. Run the suite with `npm run eval` — it makes real model calls and costs money. |
+| Build | `npm run build` (builds workspaces first — the verify package is symlinked and resolved via its `dist/`, so a src-only change there is invisible to claw until rebuilt) |
 | Try interactively | `npm run dev` (uses tsx) or `node dist/index.js` |
 
 ## Build / typecheck before claiming a task is done
@@ -49,7 +52,26 @@ Always run `npm run typecheck` and `npm test` before reporting completion of any
 
 - `.env` — `OPENAI_API_KEY`, optional `OPENAI_CLAW_MODEL`. Also loaded from `~/.openai-claw/.env`.
 - `~/.openai-claw/settings.json` — user-level defaults (model, permissionMode, allowedTools/deniedTools, mcpServers, hooks, `trustedProjects`).
-- `<workdir>/.claw/settings.json` — per-project overrides (same shape, wins over user-level). **Hooks and MCP servers defined here require explicit trust** — the first run prompts and persists the workdir into `trustedProjects`. Non-interactive runs default to deny.
+- `<workdir>/.claw/settings.json` — per-project overrides (same shape, wins over user-level, including `model` and `baseURL`). **Hooks and MCP servers defined here require explicit trust** — the first run prompts and persists the workdir into `trustedProjects`. Non-interactive runs, and a settings file that fails to parse, default to deny.
+
+## Security invariants — don't regress these
+
+- **A `:*` permission key is a reusable grant.** `describeKeys()` may only mint one for a command that cannot run a second program. Anything with a shell operator gets an exact `Bash(chain:…)` key.
+- **Deny rules are checked against every command in a chain**, not just the first.
+- **MCP servers get a filtered environment** (`buildServerEnv` in `src/mcp/fingerprint.ts`). Never hand a subprocess `process.env`.
+- **Plugin MCP servers are not registered on install.** They land in *user* settings, which no project trust gate covers, so they need `claw plugins trust <name>`.
+- **The dashboard binds 127.0.0.1.** It has no authentication.
+- **`claw pr` runs in a worktree, never the user's checkout.** In-place `checkout -b` plus `git add -A` swept uncommitted work into an agent commit and pushed it. Every top-level subcommand that runs an agent must also pass the project trust gate itself — `main()`'s gate is dispatched past.
+- **`.claw/agents` and `.claw/skills` are untrusted input.** Their text reaches the system prompt — an agent's `description` via the Task catalog with nobody invoking anything — so `listSubagents`/`listSkills` load them only when `config.trustProjectDefinitions === true`. The flag is absent until an entry point resolves trust, and absent means no.
+- **The verifier must not overclaim.** `mcpProvenance` is a structural check over leaf kinds; leaves carry payload hashes, so it cannot read consent values. Say so wherever it is reported.
+
+## Agent-loop invariants
+
+- **Every assistant `tool_call` must get a paired tool message.** Dispatch uses `Promise.allSettled` for exactly this reason, `sanitizeMessages` repairs history that drifted anyway, and `test/evals/permission-denied-recovery.json` + `parallel-reads.json` are the end-to-end regressions. A 400 saying "did not have response messages" means one of the three broke.
+- **Compaction decides on `usage.prompt_tokens`,** not the char estimate; the estimate is the fallback for the first turn and immediately after a compaction. Anything that keeps a stale count around will compact on every turn.
+- **Compaction pins the original request and the live todo list.** Dropping the task statement leaves the model with a recap and no goal.
+- **The retained window never starts on a `tool` message** — an orphaned tool response is dropped, silently costing the model work it can see itself requesting.
+- **`finish_reason === "length"` is not success.** Surface it; a truncated turn otherwise reads as a finished answer.
 
 ## What I am
 

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import type { ClawConfig } from "../config.js";
+import { updateUserSettings } from "../config.js";
 
 export interface PluginEntry {
   name: string;
@@ -13,6 +14,8 @@ export interface PluginEntry {
     agents: string[];      // filenames under <plugin>/agents
     mcp: string[];         // keys under mcpServers in <plugin>/mcp.json
   };
+  /** True once the user has explicitly enabled this plugin's MCP servers. */
+  mcpEnabled?: boolean;
 }
 
 export interface PluginLock {
@@ -133,18 +136,7 @@ function linkIntoUserConfig(config: ClawConfig, pluginDir: string, provides: Plu
       }
     }
   }
-  // MCP: merge into ~/.openai-claw/settings.json
-  if (provides.mcp.length) {
-    try {
-      const mcpData = JSON.parse(fs.readFileSync(path.join(pluginDir, "mcp.json"), "utf8"));
-      const settingsPath = path.join(config.homeDir, "settings.json");
-      const current = fs.existsSync(settingsPath) ? JSON.parse(fs.readFileSync(settingsPath, "utf8")) : {};
-      current.mcpServers = { ...(current.mcpServers ?? {}), ...mcpData.mcpServers };
-      fs.writeFileSync(settingsPath, JSON.stringify(current, null, 2));
-    } catch {
-      // non-fatal
-    }
-  }
+  // MCP servers are deliberately NOT linked here — see enablePluginMcp.
 }
 
 function unlinkFromUserConfig(config: ClawConfig, entry: PluginEntry): void {
@@ -158,15 +150,68 @@ function unlinkFromUserConfig(config: ClawConfig, entry: PluginEntry): void {
   }
   if (entry.provides.mcp.length) {
     try {
-      const settingsPath = path.join(config.homeDir, "settings.json");
-      if (!fs.existsSync(settingsPath)) return;
-      const current = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-      for (const m of entry.provides.mcp) {
-        if (current.mcpServers) delete current.mcpServers[m];
-      }
-      fs.writeFileSync(settingsPath, JSON.stringify(current, null, 2));
+      updateUserSettings(config, (current) => {
+        for (const m of entry.provides.mcp) {
+          if (current.mcpServers) delete current.mcpServers[m];
+        }
+      });
     } catch {}
   }
+}
+
+/** The MCP server definitions a plugin ships, for display before consent. */
+export function pluginMcpServers(config: ClawConfig, name: string): Record<string, any> {
+  try {
+    const file = path.join(pluginsDir(config), name, "mcp.json");
+    if (!fs.existsSync(file)) return {};
+    return JSON.parse(fs.readFileSync(file, "utf8")).mcpServers ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Register a plugin's MCP servers in the user's settings.
+ *
+ * This is a separate, explicit step because MCP servers run arbitrary
+ * subprocesses, and user-level servers are not covered by the per-project
+ * trust gate — merging them at install time meant `claw install <git-url>`
+ * silently granted code execution in every project, with no prompt.
+ */
+export function enablePluginMcp(
+  config: ClawConfig,
+  name: string
+): { ok: true; servers: string[] } | { ok: false; error: string } {
+  const lock = readLockfile(config);
+  const entry = lock.plugins.find((p) => p.name === name);
+  if (!entry) return { ok: false, error: `Plugin '${name}' is not installed.` };
+  const servers = pluginMcpServers(config, name);
+  const names = Object.keys(servers);
+  if (names.length === 0) return { ok: false, error: `Plugin '${name}' ships no MCP servers.` };
+  updateUserSettings(config, (current) => {
+    current.mcpServers = { ...(current.mcpServers ?? {}), ...servers };
+  });
+  entry.mcpEnabled = true;
+  writeLockfile(config, lock);
+  return { ok: true, servers: names };
+}
+
+/** Remove a plugin's MCP servers from the user's settings, keeping the plugin. */
+export function disablePluginMcp(
+  config: ClawConfig,
+  name: string
+): { ok: true; servers: string[] } | { ok: false; error: string } {
+  const lock = readLockfile(config);
+  const entry = lock.plugins.find((p) => p.name === name);
+  if (!entry) return { ok: false, error: `Plugin '${name}' is not installed.` };
+  updateUserSettings(config, (current) => {
+    for (const m of entry.provides.mcp) {
+      if (current.mcpServers) delete current.mcpServers[m];
+    }
+  });
+  entry.mcpEnabled = false;
+  writeLockfile(config, lock);
+  return { ok: true, servers: entry.provides.mcp };
 }
 
 function copyDir(src: string, dest: string): void {
@@ -196,6 +241,7 @@ export function installPlugin(config: ClawConfig, source: string): { ok: true; e
     installedAt: new Date().toISOString(),
     ref: cloned.ref,
     provides,
+    mcpEnabled: false,
   };
   linkIntoUserConfig(config, dir, provides);
 

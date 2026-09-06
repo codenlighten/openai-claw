@@ -14,6 +14,26 @@ export function planModeExtra(): string {
   ].join("\n");
 }
 
-export function setPlanMode(config: ClawConfig, enabled: boolean): void {
-  config.permissionMode = enabled ? "plan" : "ask";
+/**
+ * The mode to return to when plan mode is switched off, per config. Keyed by
+ * the config object rather than held in a module variable so two agents in one
+ * process cannot restore each other's mode.
+ */
+const previousModes = new WeakMap<ClawConfig, ClawConfig["permissionMode"]>();
+
+export function setPlanMode(
+  config: ClawConfig,
+  enabled: boolean,
+  currentMode: ClawConfig["permissionMode"] = config.permissionMode
+): void {
+  if (enabled) {
+    // Remember where the user was: leaving plan mode used to drop everyone to
+    // "ask", silently discarding an acceptEdits or bypassPermissions session.
+    if (currentMode !== "plan") previousModes.set(config, currentMode);
+    config.permissionMode = "plan";
+    return;
+  }
+  const prev = previousModes.get(config);
+  config.permissionMode = !prev || prev === "plan" ? "ask" : prev;
+  previousModes.delete(config);
 }

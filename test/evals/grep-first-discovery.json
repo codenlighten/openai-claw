@@ -1,0 +1,20 @@
+{
+  "id": "grep-first-discovery",
+  "description": "Locate every reference to a symbol across a tree. The system prompt tells the model to bulk-discover with Grep rather than walking the tree a file at a time; this checks it does.",
+  "setup": [
+    "mkdir -p src/a src/b src/c",
+    "printf 'export const parseConfig = (s) => JSON.parse(s);\\n' > src/a/config.js",
+    "printf 'import { parseConfig } from \"../a/config.js\";\\nexport const load = (s) => parseConfig(s);\\n' > src/b/load.js",
+    "printf 'import { parseConfig } from \"../a/config.js\";\\nexport const boot = (s) => parseConfig(s);\\n' > src/c/boot.js",
+    "printf 'nothing relevant here\\n' > src/c/notes.txt",
+    "printf '# app\\n' > README.md"
+  ],
+  "prompt": "Which files reference `parseConfig`? Just list the file paths — do not change anything.",
+  "expect": {
+    "tools_used": ["Grep"],
+    "no_new_files": true,
+    "files_unchanged": ["src/a/config.js", "src/b/load.js", "src/c/boot.js", "README.md"],
+    "max_turns_used": 6
+  },
+  "maxTurns": 12
+}

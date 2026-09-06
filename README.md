@@ -48,7 +48,11 @@ For independent verification with no claw runtime:
 ```bash
 npm install @smartledger.technology/openai-claw-verify   # ~11 kB
 # then call verifyAttestation() against any sidecar
-ots verify proofs/*.ots                              # standard Python OTS tool
+
+# For the Bitcoin side, use the standard client. The timestamped message is the
+# canonical JSON of the signed header, which never exists as a file — so pass
+# the digest (it is `anchor.digest` in the sidecar) rather than a target file:
+ots verify -d $(jq -r .anchor.digest <session-id>.attest.json) proofs/<session-id>.alice.ots
 ```
 
 ---
@@ -60,7 +64,7 @@ ots verify proofs/*.ots                              # standard Python OTS tool
 3. **The Merkle root was signed by the local ML-DSA-65 identity.** Post-quantum (NIST FIPS-204) signature verifies under the public key embedded in the sidecar.
 4. **The `.ots` files are independently parseable** by the standard OpenTimestamps tool — claw is not in the verification path.
 5. **The audit-side package verifies without trusting the runtime agent.** `@smartledger.technology/openai-claw-verify` has zero dependency on claw, OpenAI, or the model.
-6. **Which remote MCP server supplied each tool call.** When the agent uses an `mcp__<server>__<tool>` capability, the server attachment, the tool advertisement, and per-call provenance (`mcp_attach`, `mcp_tool_offered`, `mcpProvenance`) are signed into the same Merkle tree — a verifier can prove not just that a tool ran, but where the tool came from.
+6. **That every MCP tool call was preceded by an attachment, an advertisement and a consent record.** When the agent uses an `mcp__<server>__<tool>` capability, `mcp_attach`, `mcp_tool_offered` and `permission_decision` leaves — carrying the server fingerprint, the tool schema hash and the consent decision — are signed into the same Merkle tree ahead of the call. The `mcpProvenance` check is **structural**: it proves those leaves exist in that order. See "What is not proven" for the limit.
 
 ## What is not proven
 
@@ -70,7 +74,9 @@ This honesty is what makes the project defensible:
 2. **The user intended every action the AI took.** Verification proves what happened, not what was wanted.
 3. **The terminal environment was clean.** If the local machine was compromised at the time of the session, the attestor could have been fed false data — the signature would still verify.
 4. **The model was honest internally.** Verification covers the I/O boundary. It says nothing about model alignment, hallucination, or intent.
-5. **Bitcoin block confirmation, immediately.** Initial OTS proofs are pending — they become Bitcoin-confirmed after the calendars' daily merge (~3 hours). Run `ots upgrade` after that to fetch the upgraded proof, then `ots verify`.
+5. **Bitcoin block confirmation, immediately.** Initial OTS proofs are pending — they become Bitcoin-confirmed after the calendars' daily merge (~3 hours). Run `ots upgrade <file>.ots` after that to fetch the completed proof, then `ots verify -d <digest> <file>.ots`. Confirming the block itself needs a Bitcoin node; `claw attest export-ots` prints the exact commands with the digest filled in.
+6. **That an MCP tool call's provenance leaves describe *that* call.** Leaves store payload *hashes*, so the verifier cannot read them: it confirms an `mcp_attach`, an `mcp_tool_offered` and a `permission_decision` precede each MCP call, but not that they refer to the same server and tool, nor that the consent was granted rather than refused. Binding them by content requires `session.json` to record MCP events too — tracked for a follow-up.
+7. **Anything about the transcript, unless you supply it.** The signature covers leaf hashes, not session text. `claw audit verify` only reports `sessionAlignment` when the matching `session.json` is present; without it, a verified sidecar says a session of that shape occurred, not what was in it.
 
 ---
 
@@ -163,7 +169,7 @@ Alongside the audit story, claw is a full coding agent — competitive surface w
 - **Subagents** — `Task` tool spawns an isolated agent. Built-in `general-purpose` / `explore` plus a frontmatter-driven registry. Optional `isolation: "worktree"` runs the subagent in a temp git worktree and returns a sanitized diff (sensitive paths like `.env`, `*.pem`, `id_rsa` are redacted).
 - **Plan mode** — read-only investigation, no mutations until approved
 - **Hooks** — `PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` / `SessionStart` / `SessionEnd` / `PreCompact` / `SubagentStop` / `Notification` shell hooks (exit 2 = block)
-- **Project trust gate** — the first time you open a repo whose `.claw/settings.json` defines hooks or MCP servers, claw prompts before honoring them and remembers your answer.
+- **Project trust gate** — the first time you open a repo whose `.claw/` defines hooks, MCP servers, or agent/skill definitions, claw prompts before honoring them and remembers your answer. Agent and skill text reaches the model's system prompt, so it is gated the same as code execution.
 - **Skills** — Markdown skill files with frontmatter, invoked as `/skill-name`
 - **Persistent memory** — `MEMORY.md` index + per-entry frontmatter files
 - **Sessions** — every run is saved under `~/.openai-claw/projects/<slug>/sessions/`; `--continue`, `/sessions`, `/fork` restore or branch them
@@ -171,12 +177,12 @@ Alongside the audit story, claw is a full coding agent — competitive surface w
 - **Semantic index (RAG)** — `/index` embeds the working tree with `text-embedding-3-small`; the agent can query via the `Semantic` tool
 - **Cost tracking** — per-turn cost is logged to `cost.log` and surfaced via `/cost` and the optional dashboard
 - **MCP** — stdio and streamable-HTTP MCP clients; remote tools wrapped as `mcp__<server>__<tool>`
-- **Plugins** — `claw install <git-url>` / `claw uninstall <name>` / `claw plugins [list|search]`
-- **Auto-PR** — `claw pr "<task>"` runs the agent in a worktree and opens a PR
-- **Dashboard** — `claw dashboard` serves a local web UI for cost, sessions, evals
+- **Plugins** — `claw install <git-url>` / `claw uninstall <name>` / `claw plugins [list|search|trust|untrust]`
+- **Auto-PR** — `claw pr "<task>"` runs the agent in an isolated git worktree, commits, pushes and opens a draft PR. Your working tree is never touched, and the run is attested like any other session.
+- **Dashboard** — `claw dashboard` serves a loopback-only web UI for cost, sessions, evals
 - **Notifications** — desktop notifications for long-running tools and session completion
 - **Self-review** — `/review` asks the agent to critique the current branch's diff
-- **Evals** — `npm run eval` runs scenario-based regression tests against the agent
+- **Evals** — `npm run eval` runs 14 scenario-based regression cases against the agent in sandboxed repos (real model calls, so it costs money)
 - **Shell escape** — prefix any input with `!` to run it directly in the shell
 - **One-shot mode** — `claw -p "your prompt"` runs once and prints the answer
 
@@ -219,8 +225,23 @@ Optional environment overrides:
 | `OPENAI_BASE_URL` | Alternative API base (Azure, vLLM, OpenRouter, …) |
 | `OPENAI_CLAW_SEARCH_PROVIDER` | `duckduckgo` (default) or `tavily` |
 | `TAVILY_API_KEY` | API key for Tavily web search |
+| `OPENAI_CLAW_MCP_ENV_PASSTHROUGH` | Extra env var names to expose to MCP servers (comma-separated) |
+| `OPENAI_CLAW_STRICT_TOOLS` | Set to `0` to disable strict-mode tool schemas |
 
 Persistent settings live in `~/.openai-claw/settings.json` and (per project) `<workdir>/.claw/settings.json`. Project settings win.
+
+## Security model
+
+What the sandbox actually is, so you can judge it:
+
+- **Tool permissions.** Rules match a *key*: `Read`, `Bash(npm:*)`, `WebFetch(example.com)`. A shell command carrying an operator (`;`, `&&`, `|`, backticks, `$( )`, redirection) never gets a reusable prefix key — it is keyed exactly and re-prompts every time, so approving `git status` cannot also approve `git status; curl … | sh`. Deny rules are checked against *every* command in a chain and against the command's basename, so `Bash(rm:*)` also stops `/bin/rm`.
+- **MCP subprocesses get a filtered environment.** Only what a server needs to run (`PATH`, `HOME`, locale, …) plus whatever its own `env` block declares. `OPENAI_API_KEY` and everything else in your shell is withheld; widen it deliberately with `OPENAI_CLAW_MCP_ENV_PASSTHROUGH`.
+- **Project-level hooks and MCP servers need trust.** The first run in a directory that declares them prompts; the answer is remembered in `trustedProjects`. Non-interactive runs deny.
+- **Plugin MCP servers need a second, explicit step.** `claw install` never registers them — it prints what they would run. `claw plugins trust <name>` registers them, `claw plugins untrust <name>` removes them. This is separate because plugin servers land in *user* settings and so apply to every project.
+- **A project cannot write to your system prompt without consent.** `.claw/agents/*.md` and `.claw/skills/*/SKILL.md` are loaded only after the trust prompt — an agent definition's description otherwise reaches the model through the Task tool catalog before you type anything.
+- **The dashboard binds loopback only.** It serves whole transcripts with no authentication.
+
+Not in scope: claw does not sandbox the filesystem or network of the commands you approve. Approving a command runs it with your privileges.
 
 ## Use
 

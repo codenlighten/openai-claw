@@ -5,6 +5,7 @@ import os from "node:os";
 import { readTool } from "../src/tools/read.js";
 import { writeTool } from "../src/tools/write.js";
 import { editTool } from "../src/tools/edit.js";
+import { bashTool } from "../src/tools/bash.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 let tmp: string;
@@ -126,6 +127,30 @@ describe("Edit", () => {
   });
 });
 
+describe("Bash", () => {
+  it("returns an error instead of crashing when the shell cannot spawn", async () => {
+    // An unspawnable child emits "error"; with no listener Node rethrows it as
+    // an uncaught exception and takes the whole CLI down.
+    const badCtx = { ...ctx(), config: { ...ctx().config, workdir: path.join(tmp, "gone") } };
+    const res = await bashTool.run({ command: "echo hi" }, badCtx);
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("Failed to start command");
+  });
+
+  it("runs a command and reports the exit code", async () => {
+    const res = await bashTool.run({ command: "echo hello" }, ctx());
+    expect(res.isError).toBeFalsy();
+    expect(res.content).toContain("hello");
+    expect(res.content).toContain("[exit code: 0]");
+  });
+
+  it("flags a non-zero exit", async () => {
+    const res = await bashTool.run({ command: "exit 3" }, ctx());
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("[exit code: 3]");
+  });
+});
+
 describe("Bash background + BashOutput + KillShell", () => {
   it("starts a background shell, polls output, then kills it", async () => {
     const { bashTool } = await import("../src/tools/bash.js");
@@ -182,5 +207,43 @@ describe("Read (.ipynb)", () => {
     expect(r.content).toContain("print('hi')");
     expect(r.content).toContain("[cell 2 output]");
     expect(r.content).toContain("hi");
+  });
+});
+
+describe("line endings", () => {
+  it("Write keeps a CRLF file's line endings when overwriting", async () => {
+    // Edit already did this; Write did not, so the same request produced
+    // different files depending on which tool the model chose.
+    const fp = path.join(tmp, "windows.js");
+    fs.writeFileSync(fp, "line one\r\nlet greeting = 'helo';\r\nline three\r\n");
+    const res = await writeTool.run(
+      { file_path: fp, content: "line one\nlet greeting = 'hello';\nline three\n" },
+      ctx()
+    );
+    expect(res.isError).toBeFalsy();
+    const after = fs.readFileSync(fp, "utf8");
+    expect(after).toContain("hello");
+    expect(after.split("\n").filter(Boolean).every((l) => l.endsWith("\r"))).toBe(true);
+    expect(res.content).toContain("kept CRLF");
+  });
+
+  it("Write leaves an LF file alone", async () => {
+    const fp = path.join(tmp, "unix.js");
+    fs.writeFileSync(fp, "a\nb\n");
+    await writeTool.run({ file_path: fp, content: "c\nd\n" }, ctx());
+    expect(fs.readFileSync(fp, "utf8")).toBe("c\nd\n");
+  });
+
+  it("Write honors content that deliberately carries CRLF", async () => {
+    const fp = path.join(tmp, "new.txt");
+    await writeTool.run({ file_path: fp, content: "x\r\ny\r\n" }, ctx());
+    expect(fs.readFileSync(fp, "utf8")).toBe("x\r\ny\r\n");
+  });
+
+  it("Edit still preserves CRLF", async () => {
+    const fp = path.join(tmp, "edit-crlf.js");
+    fs.writeFileSync(fp, "a\r\nhelo\r\nc\r\n");
+    await editTool.run({ file_path: fp, old_string: "helo", new_string: "hello" }, ctx());
+    expect(fs.readFileSync(fp, "utf8")).toBe("a\r\nhello\r\nc\r\n");
   });
 });

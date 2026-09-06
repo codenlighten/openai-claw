@@ -26,6 +26,13 @@ export interface ClawConfig {
   memoryDir: string;
   maxTurns: number;
   maxToolResultChars: number;
+  /**
+   * Whether <workdir>/.claw agent and skill definitions may be loaded. Set by
+   * resolveProjectTrust; absent means "not yet resolved", which is treated as
+   * NOT trusted. Their text reaches the model's system prompt, so an entry
+   * point that never resolves trust must not load them.
+   */
+  trustProjectDefinitions?: boolean;
 }
 
 const DEFAULTS = {
@@ -54,9 +61,9 @@ export function loadConfig(overrides: Partial<ClawConfig> = {}): ClawConfig {
   }
 
   const workdir = overrides.workdir ?? process.cwd();
-  const homeDir = path.join(os.homedir(), ".openai-claw");
-  const projectDir = resolveProjectDir(workdir);
-  const memoryDir = path.join(projectDir, "memory");
+  const homeDir = overrides.homeDir ?? path.join(os.homedir(), ".openai-claw");
+  const projectDir = overrides.projectDir ?? resolveProjectDir(workdir);
+  const memoryDir = overrides.memoryDir ?? path.join(projectDir, "memory");
 
   for (const dir of [homeDir, projectDir, memoryDir]) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -67,9 +74,9 @@ export function loadConfig(overrides: Partial<ClawConfig> = {}): ClawConfig {
   const projectSettings = readJsonSafe(path.join(workdir, ".claw", "settings.json"));
 
   const merged: ClawConfig = {
-    model: process.env.OPENAI_CLAW_MODEL ?? userSettings.model ?? projectSettings.model ?? DEFAULTS.model,
+    model: process.env.OPENAI_CLAW_MODEL ?? projectSettings.model ?? userSettings.model ?? DEFAULTS.model,
     apiKey,
-    baseURL: process.env.OPENAI_BASE_URL ?? userSettings.baseURL ?? projectSettings.baseURL,
+    baseURL: process.env.OPENAI_BASE_URL ?? projectSettings.baseURL ?? userSettings.baseURL,
     maxTokens: projectSettings.maxTokens ?? userSettings.maxTokens,
     temperature: projectSettings.temperature ?? userSettings.temperature,
     contextWindow: projectSettings.contextWindow ?? userSettings.contextWindow ?? DEFAULTS.contextWindow,
@@ -103,10 +110,21 @@ export function saveUserSetting<K extends keyof ClawConfig>(
   key: K,
   value: ClawConfig[K]
 ): void {
+  updateUserSettings(config, (current) => {
+    current[key] = value;
+  });
+}
+
+/**
+ * Read-modify-write the user settings file under the lock. Every writer must
+ * go through here — a direct writeFileSync races the permission prompt's
+ * "save" path and silently drops one side's changes.
+ */
+export function updateUserSettings(config: ClawConfig, mutate: (current: any) => void): void {
   const p = path.join(config.homeDir, "settings.json");
   withSettingsLock(p, () => {
     const current = readJsonSafe(p);
-    current[key] = value;
+    mutate(current);
     fs.writeFileSync(p, JSON.stringify(current, null, 2));
   });
 }

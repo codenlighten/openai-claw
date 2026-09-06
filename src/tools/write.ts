@@ -24,11 +24,16 @@ export const writeTool: Tool<{ file_path: string; content: string }> = {
     try {
       const existed = fs.existsSync(fp);
       const before = existed ? fs.readFileSync(fp, "utf8") : "";
-      fs.writeFileSync(fp, input.content, "utf8");
+      // Match Edit's line-ending handling. Rewriting a CRLF file with LF
+      // content silently reformats every line in it, so which of the two tools
+      // the model happened to pick decided whether the file survived intact.
+      const keepCRLF = existed && before.includes("\r\n") && !input.content.includes("\r\n");
+      const content = keepCRLF ? input.content.replace(/\n/g, "\r\n") : input.content;
+      fs.writeFileSync(fp, content, "utf8");
       const summary = existed
-        ? `Overwrote ${fp} (${input.content.length} bytes)`
-        : `Created ${fp} (${input.content.length} bytes)`;
-      const patch = createPatch(path.relative(process.cwd(), fp), before, input.content, "", "");
+        ? `Overwrote ${fp} (${content.length} bytes)${keepCRLF ? " [kept CRLF line endings]" : ""}`
+        : `Created ${fp} (${content.length} bytes)`;
+      const patch = createPatch(path.relative(process.cwd(), fp), before, content, "", "");
       return { content: summary, display: patch };
     } catch (e: any) {
       return err(`Failed to write ${fp}: ${e?.message ?? String(e)}`);

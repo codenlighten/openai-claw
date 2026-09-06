@@ -40,6 +40,7 @@ export async function startRepl({ agent, config, permissions, sessionAttestor }:
 
   const hooks = new HookRunner(config);
   const sessionRef: { current?: string } = {};
+  const reviewRef: { current?: unknown } = {};
   await hooks.run("SessionStart", { workdir: config.workdir });
 
   banner(config);
@@ -56,18 +57,31 @@ export async function startRepl({ agent, config, permissions, sessionAttestor }:
     });
   };
 
+  // A single listener with an explicit window. The previous version registered
+  // a fresh `once` listener and a timer on every press — so repeated Ctrl-C
+  // accumulated both — and only honoured the second press within one second,
+  // while telling the user "press Ctrl-C again" with no mention of a deadline.
+  let quitArmed = false;
+  let quitTimer: NodeJS.Timeout | null = null;
   rl.on("SIGINT", () => {
     if (aborter) {
       aborter.abort();
       console.log(chalk.yellow("\n[aborted]"));
-    } else {
-      console.log(chalk.dim("\n(press Ctrl-C again or type /exit to quit)"));
-      let next = false;
-      rl.once("SIGINT", () => {
-        if (!next) exit();
-      });
-      setTimeout(() => (next = true), 1000);
+      return;
     }
+    if (quitArmed) {
+      if (quitTimer) clearTimeout(quitTimer);
+      exit();
+      return;
+    }
+    quitArmed = true;
+    console.log(chalk.dim("\n(press Ctrl-C again within 3s, or type /exit, to quit)"));
+    if (quitTimer) clearTimeout(quitTimer);
+    quitTimer = setTimeout(() => {
+      quitArmed = false;
+      quitTimer = null;
+    }, 3000);
+    quitTimer.unref?.();
   });
 
   const prompt = () => {
@@ -104,7 +118,13 @@ export async function startRepl({ agent, config, permissions, sessionAttestor }:
       if (!cmd) {
         console.log(chalk.red(`unknown command: /${head}`));
       } else {
-        await cmd.run(args, { agent, config, permissions, exit, sessionRef });
+        // A slash command that throws must not take the session down with it —
+        // `/remember project :: d :: b` (name omitted) was enough to do that.
+        try {
+          await cmd.run(args, { agent, config, permissions, exit, sessionRef, reviewRef });
+        } catch (e: any) {
+          console.log(chalk.red(`/${head} failed: ${e?.message ?? e}`));
+        }
       }
       prompt();
       continue;
@@ -224,6 +244,9 @@ function makeEventHandler(hooks: HookRunner) {
         }
         break;
       }
+      case "warning":
+        process.stdout.write("\n" + chalk.yellow(`! ${evt.data}`) + "\n");
+        break;
       case "error":
         process.stdout.write("\n" + chalk.red(`error: ${evt.data}`) + "\n");
         break;

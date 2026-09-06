@@ -44,12 +44,15 @@ export function buildTaskTool(config: ClawConfig): Tool<{
         return err(`Unknown subagent_type: ${input.subagent_type}. Available: ${enumNames.join(", ")}`);
       }
       try {
-        const result = await ctx.spawnSubagent({
-          description: input.description,
-          prompt: input.prompt,
-          subagent_type: input.subagent_type,
-          isolation: input.isolation,
-        });
+        const result = await ctx.spawnSubagent(
+          {
+            description: input.description,
+            prompt: input.prompt,
+            subagent_type: input.subagent_type,
+            isolation: input.isolation,
+          },
+          ctx.abortSignal
+        );
         return ok(result);
       } catch (e: any) {
         return err(`Subagent failed: ${e?.message ?? String(e)}`);
@@ -86,11 +89,14 @@ export const taskTool: Tool<{
   async run(input, ctx) {
     if (!ctx.spawnSubagent) return err("Subagent spawning is not available in this context.");
     try {
-      const result = await ctx.spawnSubagent({
-        description: input.description,
-        prompt: input.prompt,
-        subagent_type: input.subagent_type,
-      });
+      const result = await ctx.spawnSubagent(
+        {
+          description: input.description,
+          prompt: input.prompt,
+          subagent_type: input.subagent_type,
+        },
+        ctx.abortSignal
+      );
       return ok(result);
     } catch (e: any) {
       return err(`Subagent failed: ${e?.message ?? String(e)}`);

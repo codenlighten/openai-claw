@@ -1,0 +1,20 @@
+{
+  "id": "todo-for-multistep",
+  "description": "A task with four distinct steps should be tracked with TodoWrite, which the tool description reserves for 3+ step work.",
+  "setup": [
+    "printf 'a\\n' > one.txt",
+    "printf 'b\\n' > two.txt"
+  ],
+  "prompt": "Do all four of these: (1) create three.txt containing c, (2) create four.txt containing d, (3) change one.txt to contain A, (4) change two.txt to contain B. Track your progress as you go.",
+  "expect": {
+    "files_exist": ["three.txt", "four.txt"],
+    "file_matches": [
+      { "path": "three.txt", "pattern": "c" },
+      { "path": "four.txt", "pattern": "d" },
+      { "path": "one.txt", "pattern": "A" },
+      { "path": "two.txt", "pattern": "B" }
+    ],
+    "tools_used": ["TodoWrite"]
+  },
+  "maxTurns": 25
+}

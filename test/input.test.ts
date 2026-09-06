@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -15,6 +15,12 @@ beforeAll(() => {
   ]));
   fs.mkdirSync(path.join(tmp, "subdir"));
   fs.writeFileSync(path.join(tmp, "subdir", "a.txt"), "a");
+});
+
+// Every other suite cleans up after itself; this one left a directory in
+// /tmp per test run.
+afterAll(() => {
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 function cfg(): ClawConfig {
@@ -77,5 +83,34 @@ describe("prepareUserMessage", () => {
     const r = prepareUserMessage("compare @hello.txt and @hello.txt again", cfg());
     const matches = (r.content as string).match(/<file/g) ?? [];
     expect(matches.length).toBe(1);
+  });
+});
+
+describe("attachment reporting", () => {
+  it("names every file it inlined so the caller can show it", () => {
+    const r = prepareUserMessage(`look at @hello.txt`, cfg());
+    expect(r.attachments).toEqual(["📄 hello.txt"]);
+  });
+
+  it("reports an absolute path pulled in from pasted text", () => {
+    // A path inside pasted text is inlined into the prompt; the caller has to
+    // be able to tell the user that happened.
+    const r = prepareUserMessage(`log said @${path.join(tmp, "hello.txt")} failed`, cfg());
+    expect(r.attachments).toHaveLength(1);
+    expect(String(r.content)).toContain("hello world");
+  });
+
+  it("says when a directory listing was truncated", () => {
+    const big = path.join(tmp, "many");
+    fs.mkdirSync(big, { recursive: true });
+    for (let i = 0; i < 100; i++) fs.writeFileSync(path.join(big, `f${i}.txt`), "x");
+    const r = prepareUserMessage(`see @many`, cfg());
+    expect(String(r.content)).toContain("more entr");
+  });
+
+  it("does not claim an attachment for a ref that resolved to nothing", () => {
+    const r = prepareUserMessage("ping @nobody-here", cfg());
+    expect(r.attachments).toEqual([]);
+    expect(String(r.content)).toContain('error="not found"');
   });
 });

@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import { listSessions, loadSession } from "../session.js";
 import { listMemories, writeMemory } from "../memory/index.js";
 import { OpenAIClient } from "../client.js";
@@ -130,17 +129,12 @@ Return JSON.`,
 }
 /** Apply an approved proposal by writing it to the memory store. */
 export function applyProposal(config, p) {
-    return require_writeMemory_path(writeMemory)(config, {
+    return writeMemory(config, {
         name: p.name,
         description: p.description,
         type: p.type,
         body: p.body,
     });
-}
-// Tiny indirection so the static analyzer doesn't get confused if writeMemory
-// later changes shape — runtime behavior unchanged.
-function require_writeMemory_path(fn) {
-    return fn;
 }
 function extractJson(text) {
     // Strip optional ```json fences and return the first {...} block.
@@ -152,6 +146,4 @@ function extractJson(text) {
         return body;
     return body.slice(start, end + 1);
 }
-// Re-export fs for tests that need to inspect proposal-application output.
-export const _internal = { fs };
 //# sourceMappingURL=index.js.map

@@ -1,0 +1,17 @@
+{
+  "id": "sequential-edits-one-file",
+  "description": "Three independent changes to one file. Parallel Edit calls against the same file fail after the first mutates it, so this checks the model sequences them (or rewrites with Write) and lands all three.",
+  "setup": [
+    "printf 'const HOST = \"localhost\";\\nconst PORT = 8080;\\nconst DEBUG = false;\\n' > config.js"
+  ],
+  "prompt": "In config.js: change HOST to \"0.0.0.0\", change PORT to 3000, and change DEBUG to true.",
+  "expect": {
+    "file_matches": [
+      { "path": "config.js", "pattern": "0\\.0\\.0\\.0" },
+      { "path": "config.js", "pattern": "PORT = 3000" },
+      { "path": "config.js", "pattern": "DEBUG = true" }
+    ],
+    "no_new_files": true
+  },
+  "maxTurns": 15
+}

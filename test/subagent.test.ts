@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
-import { redactSensitiveHunks } from "../src/subagent.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import { spawnSync } from "node:child_process";
+import { redactSensitiveHunks, collectWorktreeDiff, countCommitsSince, runSubagent } from "../src/subagent.js";
+import { buildTaskTool } from "../src/tools/task.js";
 
 describe("subagent worktree diff redaction", () => {
   const benign = `diff --git a/src/foo.ts b/src/foo.ts
@@ -51,5 +56,120 @@ diff --git a/keys/id_rsa b/keys/id_rsa
 
   it("handles empty input", () => {
     expect(redactSensitiveHunks("")).toEqual({ diff: "", redacted: [] });
+  });
+});
+
+describe("subagent worktree diff collection", () => {
+  let repo: string;
+  let worktree: string;
+  let base: string;
+
+  const git = (args: string[], cwd: string) =>
+    spawnSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, encoding: "utf8" });
+
+  beforeEach(() => {
+    repo = fs.mkdtempSync(path.join(os.tmpdir(), "claw-wt-"));
+    git(["init", "-q", "."], repo);
+    fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
+    git(["add", "."], repo);
+    git(["commit", "-qm", "init"], repo);
+    worktree = path.join(repo, "wt");
+    git(["worktree", "add", "-q", "-b", "claw/test", worktree], repo);
+    base = git(["rev-parse", "HEAD"], worktree).stdout.trim();
+  });
+
+  afterEach(() => fs.rmSync(repo, { recursive: true, force: true }));
+
+  it("sees work the subagent committed", () => {
+    // A committed worktree has a CLEAN tree. Diffing only the working tree
+    // reported nothing here, and the caller then deleted the branch.
+    fs.writeFileSync(path.join(worktree, "b.txt"), "b\n");
+    git(["add", "."], worktree);
+    git(["commit", "-qm", "subagent work"], worktree);
+    expect(git(["status", "--porcelain"], worktree).stdout.trim()).toBe("");
+
+    const diff = collectWorktreeDiff(worktree, base);
+    expect(diff).toContain("b.txt");
+    expect(countCommitsSince(worktree, base)).toBe(1);
+  });
+
+  it("sees uncommitted work, including untracked files", () => {
+    fs.writeFileSync(path.join(worktree, "c.txt"), "c\n");
+    const diff = collectWorktreeDiff(worktree, base);
+    expect(diff).toContain("c.txt");
+    expect(countCommitsSince(worktree, base)).toBe(0);
+  });
+
+  it("sees committed and uncommitted work together", () => {
+    fs.writeFileSync(path.join(worktree, "b.txt"), "b\n");
+    git(["add", "."], worktree);
+    git(["commit", "-qm", "committed"], worktree);
+    fs.writeFileSync(path.join(worktree, "c.txt"), "c\n");
+    const diff = collectWorktreeDiff(worktree, base);
+    expect(diff).toContain("b.txt");
+    expect(diff).toContain("c.txt");
+  });
+
+  it("reports nothing for an untouched worktree", () => {
+    expect(collectWorktreeDiff(worktree, base).trim()).toBe("");
+    expect(countCommitsSince(worktree, base)).toBe(0);
+  });
+});
+
+describe("abort propagation into subagents", () => {
+  const cfg = () =>
+    ({
+      workdir: os.tmpdir(),
+      homeDir: os.tmpdir(),
+      projectDir: os.tmpdir(),
+      memoryDir: os.tmpdir(),
+      model: "test",
+      apiKey: "x",
+      allowedTools: [],
+      deniedTools: [],
+      contextWindow: 0,
+      compactThreshold: 1,
+      permissionMode: "bypassPermissions",
+      maxTurns: 50,
+      maxToolResultChars: 50_000,
+      models: {},
+    }) as any;
+
+  const ctxFor = (over: any = {}) => ({
+    config: cfg(),
+    permissionCheck: async () => ({ allow: true }),
+    ...over,
+  });
+
+  it("Task hands the caller's signal to spawnSubagent", async () => {
+    // Without this the parent's abort — Ctrl-C, or an eval's per-case timeout —
+    // could not reach a subagent once the Task had been dispatched.
+    const controller = new AbortController();
+    let seen: AbortSignal | undefined;
+    const tool = buildTaskTool(cfg());
+    await tool.run(
+      { description: "d", prompt: "p" },
+      ctxFor({
+        abortSignal: controller.signal,
+        spawnSubagent: async (_req: any, signal?: AbortSignal) => {
+          seen = signal;
+          return "done";
+        },
+      })
+    );
+    expect(seen).toBe(controller.signal);
+  });
+
+  it("runSubagent refuses to start when already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runSubagent(
+      cfg(),
+      async () => ({ allow: true }),
+      { description: "d", prompt: "p" },
+      undefined,
+      controller.signal
+    );
+    expect(result).toContain("aborted");
   });
 });

@@ -150,8 +150,12 @@ function sendHtml(res: http.ServerResponse, html: string): void {
   res.end(html);
 }
 
-export async function startDashboard(config: ClawConfig, port: number): Promise<void> {
-  const server = http.createServer((req, res) => {
+/**
+ * Build the dashboard's HTTP server without listening. Exported so callers
+ * (and tests) can choose the port and interface.
+ */
+export function createDashboardServer(config: ClawConfig, port = 0): http.Server {
+  return http.createServer((req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${port}`);
     try {
       if (url.pathname === "/") return sendHtml(res, INDEX_HTML);
@@ -186,8 +190,22 @@ export async function startDashboard(config: ClawConfig, port: number): Promise<
       res.end(`server error: ${e?.message ?? e}`);
     }
   });
-  await new Promise<void>((resolve) => server.listen(port, () => resolve()));
-  console.error(chalk.green(`dashboard listening on http://localhost:${port}`));
+}
+
+/**
+ * The dashboard serves whole session transcripts and the cost log with no
+ * authentication, so it binds loopback only. Pass an explicit host to widen
+ * that deliberately.
+ */
+export async function startDashboard(
+  config: ClawConfig,
+  port: number,
+  opts: { host?: string } = {}
+): Promise<void> {
+  const host = opts.host ?? "127.0.0.1";
+  const server = createDashboardServer(config, port);
+  await new Promise<void>((resolve) => server.listen(port, host, () => resolve()));
+  console.error(chalk.green(`dashboard listening on http://${host}:${port}`));
   console.error(chalk.dim("Ctrl-C to stop"));
   await new Promise<void>(() => {}); // run until killed
 }

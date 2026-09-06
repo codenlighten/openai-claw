@@ -1,0 +1,16 @@
+{
+  "id": "truncation-is-surfaced",
+  "description": "Forces finish_reason=length by capping output tokens hard, and checks a warning event is emitted. A cut-off turn otherwise reads as a finished answer, and a cut-off tool call vanishes entirely because its arguments fail to parse. Until the harness gained a maxTokens knob this path had never actually fired.",
+  "setup": [
+    "printf 'nothing to see\\n' > note.txt"
+  ],
+  "prompt": "Write a detailed twenty-paragraph essay about the history of version control systems. Do not stop early.",
+  "maxTokens": 24,
+  "expect": {
+    "warned": true,
+    "no_new_files": true
+  },
+  "maxTurns": 4,
+  "allow_errors": true,
+  "timeoutMs": 120000
+}

@@ -64,12 +64,13 @@ export class SessionAttestor {
      * agent begins running, so any subsequent mcp__-prefixed tool_call
      * leaves have the provenance triple in front of them.
      *
-     * The `trustedByProject` flag carries the result of the existing
-     * project-level trust gate forward into a signed permission_decision
-     * leaf — so even before per-server consent UX lands in 0.6.1, the
-     * mcpProvenance check has something to find.
+     * Consent is recorded per server from where it was declared: a
+     * project-level server is covered by the project trust gate, a user-level
+     * one by the user's own settings file. Recording the project verdict
+     * against a user-level server (as this did before) mislabels it as
+     * unconsented when the project simply wasn't trusted.
      */
-    recordMcpServers(servers, trustedByProject) {
+    recordMcpServers(servers, trustedByProject = true) {
         if (!this.attestor)
             return;
         for (const s of servers) {
@@ -92,12 +93,13 @@ export class SessionAttestor {
                     descriptionSha256: t.descriptionSha256,
                 });
             }
+            const projectScoped = s.scope !== "user";
             this.attestor.record("permission_decision", {
                 kind: "mcp",
                 server: s.name,
                 serverFingerprintId: s.fingerprint.fingerprintId,
-                consent: trustedByProject ? "yes" : "no",
-                scope: "project-trust", // upgrades to "per-server" in 0.6.1
+                consent: projectScoped ? (trustedByProject ? "yes" : "no") : "yes",
+                scope: projectScoped ? "project-trust" : "user-settings",
             });
         }
     }

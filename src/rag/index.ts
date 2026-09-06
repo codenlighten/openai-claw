@@ -1,9 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import OpenAI from "openai";
 import type { ClawConfig } from "../config.js";
 
 const EMBED_MODEL = "text-embedding-3-small";
+/** Bump when the on-disk shape changes; older indexes are treated as absent. */
+const INDEX_VERSION = 4;
 const CHUNK_CHARS = 4000;
 const CHUNK_OVERLAP = 400;
 const MAX_FILE_BYTES = 256 * 1024;
@@ -21,11 +25,14 @@ const EXT_ALLOW = new Set([
 export interface RagChunk {
   file: string;       // path relative to workdir
   chunkIndex: number; // 0-based within the file
+  /** sha256 of the whole source file when this chunk was embedded. */
+  fileHash: string;
   text: string;
   embedding: number[];
 }
 
 export interface RagIndex {
+  version: number;
   workdir: string;
   model: string;
   builtAt: string;
@@ -36,18 +43,77 @@ function indexFile(config: ClawConfig): string {
   return path.join(config.projectDir, "index.json");
 }
 
+/**
+ * The parsed index, held across calls. Every Semantic tool call used to re-read
+ * and re-parse the whole file — every embedding, as JSON floats — which on a
+ * real repo is tens of megabytes per query. Keyed on mtime+size so an index
+ * rebuilt by another process is picked up.
+ */
+let indexCache: { file: string; mtimeMs: number; size: number; index: RagIndex } | null = null;
+
 export function loadIndex(config: ClawConfig): RagIndex | null {
   const f = indexFile(config);
-  if (!fs.existsSync(f)) return null;
+  let stat: fs.Stats;
   try {
-    return JSON.parse(fs.readFileSync(f, "utf8")) as RagIndex;
+    stat = fs.statSync(f);
+  } catch {
+    return null;
+  }
+  if (indexCache && indexCache.file === f && indexCache.mtimeMs === stat.mtimeMs && indexCache.size === stat.size) {
+    return indexCache.index;
+  }
+  try {
+    const idx = JSON.parse(fs.readFileSync(f, "utf8")) as RagIndex;
+    if (idx.version !== INDEX_VERSION) return null;
+    indexCache = { file: f, mtimeMs: stat.mtimeMs, size: stat.size, index: idx };
+    return idx;
   } catch {
     return null;
   }
 }
 
+/** Test-only: drop the in-process index cache. */
+export function _resetIndexCache(): void {
+  indexCache = null;
+}
+
 function saveIndex(config: ClawConfig, idx: RagIndex): void {
-  fs.writeFileSync(indexFile(config), JSON.stringify(idx));
+  const f = indexFile(config);
+  fs.writeFileSync(f, JSON.stringify(idx));
+  try {
+    const stat = fs.statSync(f);
+    indexCache = { file: f, mtimeMs: stat.mtimeMs, size: stat.size, index: idx };
+  } catch {
+    indexCache = null;
+  }
+}
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/**
+ * Paths git would ignore. Indexing uploads file contents to the embeddings API,
+ * so anything the repo deliberately does not track should not be sent either.
+ * Returns an empty set outside a git repo.
+ */
+function gitIgnoredPaths(workdir: string, files: string[]): Set<string> {
+  if (files.length === 0) return new Set();
+  // NUL-separated both ways so a newline in a filename can't split one path
+  // into two and silently un-ignore it.
+  const res = spawnSync("git", ["check-ignore", "-z", "--stdin"], {
+    cwd: workdir,
+    input: files.join("\0"),
+    encoding: "utf8",
+  });
+  // 0 = at least one ignored, 1 = none ignored, 128 = not a git repo.
+  if (res.status !== 0 || !res.stdout) return new Set();
+  return new Set(
+    res.stdout
+      .split("\0")
+      .filter(Boolean)
+      .map((p) => path.resolve(workdir, p))
+  );
 }
 
 function* walkFiles(dir: string, root: string): Generator<string> {
@@ -58,7 +124,9 @@ function* walkFiles(dir: string, root: string): Generator<string> {
     return;
   }
   for (const e of entries) {
-    if (e.name.startsWith(".") && IGNORE_DIRS.has(e.name)) continue;
+    // Hidden entries are skipped wholesale: .env and friends have no business
+    // being shipped to an embeddings endpoint.
+    if (e.name.startsWith(".")) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
       if (IGNORE_DIRS.has(e.name)) continue;
@@ -72,56 +140,181 @@ function* walkFiles(dir: string, root: string): Generator<string> {
   }
 }
 
-function chunkText(text: string): string[] {
-  if (text.length <= CHUNK_CHARS) return [text];
+/**
+ * Lines that begin a new top-level construct across the languages we index.
+ * Deliberately loose: a false positive costs a slightly earlier chunk break, a
+ * false negative costs nothing that the blank-line rule doesn't already catch.
+ */
+const DECLARATION_START =
+  /^(?:export\s|module\.exports|declare\s|@|(?:public|private|protected|internal|static|final|abstract|async|unsafe|pub)\s+)?(?:function|class|interface|type|enum|struct|impl|trait|def|fn|func|const|let|var|package|namespace|describe|it|test)\b/;
+
+/** A markdown heading — the natural split point in prose files. */
+const HEADING = /^#{1,6}\s/;
+
+/**
+ * Split a file into units that shouldn't be cut in half: a run of lines from
+ * one top-level declaration (or heading, or blank-line-separated block) up to
+ * the next.
+ */
+function splitUnits(text: string): string[] {
+  const lines = text.split("\n");
+  const units: string[] = [];
+  let current: string[] = [];
+  let sawContent = false;
+  for (const line of lines) {
+    const boundary =
+      sawContent && (DECLARATION_START.test(line) || HEADING.test(line));
+    if (boundary) {
+      units.push(current.join("\n"));
+      current = [line];
+      sawContent = line.trim().length > 0;
+      continue;
+    }
+    current.push(line);
+    if (line.trim().length > 0) sawContent = true;
+  }
+  if (current.length > 0) units.push(current.join("\n"));
+  return units.filter((u) => u.length > 0);
+}
+
+/** Last-resort split for a single unit that is itself larger than a chunk. */
+function windowUnit(unit: string): string[] {
   const out: string[] = [];
   let pos = 0;
-  while (pos < text.length) {
-    const end = Math.min(text.length, pos + CHUNK_CHARS);
-    out.push(text.slice(pos, end));
-    if (end >= text.length) break;
+  while (pos < unit.length) {
+    const end = Math.min(unit.length, pos + CHUNK_CHARS);
+    out.push(unit.slice(pos, end));
+    if (end >= unit.length) break;
     pos = end - CHUNK_OVERLAP;
   }
   return out;
 }
 
 /**
- * Build (or rebuild) the project's semantic index. Calls OpenAI in batches.
- * Returns the new index plus a small summary.
+ * Chunk a file for embedding.
+ *
+ * Fixed character windows cut through the middle of a function, so a chunk
+ * could carry the tail of one definition and the head of the next. Units are
+ * packed greedily instead, which keeps a returned snippet readable as a whole
+ * thing.
+ *
+ * MEASURED: this does NOT improve retrieval. Against 30 intent-phrased queries
+ * over this repository (tools/rag-bench.mjs), structural chunking and fixed
+ * windows both score 21/30 recall@1, with MRR 0.784 vs 0.796 — and editing one
+ * source file between runs moved a single variant by more than that gap. The
+ * difference is below the noise floor. It is kept for snippet coherence: a
+ * chunk that does not stop halfway through a function is worth more to whoever
+ * reads it than to whoever ranks it.
+ *
+ * An earlier version also prefixed each chunk with its file path, on the theory
+ * that "where is auth checked" should match `src/auth/check.ts`. The benchmark
+ * says otherwise: 20/30 and MRR 0.771, slightly WORSE than plain fixed windows,
+ * because a filename lexically matching a query word outranks files that
+ * actually implement the thing ("combining leaf hashes into a root" retrieved
+ * leaf.ts over merkle.ts). It was also redundant — SearchHit carries `file` and
+ * the Semantic tool already prints the path beside every hit. Removed.
+ */
+export function chunkText(text: string): string[] {
+  const budget = CHUNK_CHARS;
+  const packed: string[] = [];
+  let current = "";
+  for (const unit of splitUnits(text)) {
+    if (unit.length > budget) {
+      if (current) {
+        packed.push(current);
+        current = "";
+      }
+      packed.push(...windowUnit(unit));
+      continue;
+    }
+    if (current.length + unit.length + 1 > budget) {
+      packed.push(current);
+      current = unit;
+      continue;
+    }
+    current = current ? `${current}\n${unit}` : unit;
+  }
+  if (current) packed.push(current);
+  // Nothing worth embedding in a blank chunk. buildIndex already skips empty
+  // files, but a whitespace-only chunk was still reachable from here.
+  const kept = packed.filter((c) => c.trim().length > 0);
+  if (kept.length > 0) return kept;
+  return text.trim() ? [text] : [];
+}
+
+/**
+ * Build (or rebuild) the project's semantic index.
+ *
+ * Incremental: a file whose content hash matches the previous index keeps its
+ * existing embeddings instead of being re-embedded. A full rebuild re-charged
+ * for every chunk in the repo on every `/index`, which made keeping the index
+ * fresh expensive enough that people don't.
  */
 export async function buildIndex(
   config: ClawConfig,
   onProgress?: (msg: string) => void
-): Promise<{ index: RagIndex; filesIndexed: number; chunks: number }> {
+): Promise<{ index: RagIndex; filesIndexed: number; chunks: number; reusedChunks: number }> {
   const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL });
 
-  const files: string[] = [];
+  // Never index the index: with projectDir inside workdir it would embed its
+  // own embeddings, growing the index every rebuild.
+  const selfPath = path.resolve(indexFile(config));
+  const candidates: string[] = [];
   for (const f of walkFiles(config.workdir, config.workdir)) {
     try {
+      if (path.resolve(f) === selfPath) continue;
       const stat = fs.statSync(f);
       if (stat.size > MAX_FILE_BYTES) continue;
-      files.push(f);
+      candidates.push(f);
     } catch {}
   }
+  const ignored = gitIgnoredPaths(config.workdir, candidates);
+  const files = candidates.filter((f) => !ignored.has(path.resolve(f)));
 
-  onProgress?.(`scanning ${files.length} file(s)…`);
+  onProgress?.(
+    `scanning ${files.length} file(s)${ignored.size > 0 ? ` (${ignored.size} git-ignored)` : ""}…`
+  );
 
-  type Pending = { file: string; chunkIndex: number; text: string };
+  // Previous embeddings, keyed by file + content hash.
+  const previous = loadIndex(config);
+  const reusable = new Map<string, RagChunk[]>();
+  if (previous && previous.model === EMBED_MODEL) {
+    for (const c of previous.chunks) {
+      if (!c.fileHash) continue;
+      const key = `${c.file}\u0000${c.fileHash}`;
+      const list = reusable.get(key);
+      if (list) list.push(c);
+      else reusable.set(key, [c]);
+    }
+  }
+
+  type Pending = { file: string; chunkIndex: number; fileHash: string; text: string };
   const pending: Pending[] = [];
+  const chunks: RagChunk[] = [];
+  let reusedChunks = 0;
   for (const f of files) {
     try {
       const text = fs.readFileSync(f, "utf8");
       if (!text.trim()) continue;
       const rel = path.relative(config.workdir, f);
-      const parts = chunkText(text);
-      parts.forEach((p, i) => pending.push({ file: rel, chunkIndex: i, text: p }));
+      const fileHash = sha256(text);
+      const cached = reusable.get(`${rel}\u0000${fileHash}`);
+      if (cached) {
+        chunks.push(...cached);
+        reusedChunks += cached.length;
+        continue;
+      }
+      chunkText(text).forEach((p, i) =>
+        pending.push({ file: rel, chunkIndex: i, fileHash, text: p })
+      );
     } catch {}
   }
 
-  onProgress?.(`embedding ${pending.length} chunk(s)…`);
+  onProgress?.(
+    `embedding ${pending.length} chunk(s)${reusedChunks > 0 ? `, reusing ${reusedChunks}` : ""}…`
+  );
 
   const BATCH = 64;
-  const chunks: RagChunk[] = [];
   for (let i = 0; i < pending.length; i += BATCH) {
     const slice = pending.slice(i, i + BATCH);
     const res = await client.embeddings.create({
@@ -137,6 +330,7 @@ export async function buildIndex(
       chunks.push({
         file: slice[j].file,
         chunkIndex: slice[j].chunkIndex,
+        fileHash: slice[j].fileHash,
         text: slice[j].text,
         embedding: res.data[j].embedding,
       });
@@ -144,14 +338,17 @@ export async function buildIndex(
     onProgress?.(`embedded ${Math.min(i + BATCH, pending.length)}/${pending.length}`);
   }
 
+  chunks.sort((a, b) => (a.file === b.file ? a.chunkIndex - b.chunkIndex : a.file < b.file ? -1 : 1));
+
   const idx: RagIndex = {
+    version: INDEX_VERSION,
     workdir: config.workdir,
     model: EMBED_MODEL,
     builtAt: new Date().toISOString(),
     chunks,
   };
   saveIndex(config, idx);
-  return { index: idx, filesIndexed: files.length, chunks: chunks.length };
+  return { index: idx, filesIndexed: files.length, chunks: chunks.length, reusedChunks };
 }
 
 function cosine(a: number[], b: number[]): number {

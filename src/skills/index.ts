@@ -16,9 +16,10 @@ export interface Skill {
  * additional system context when the user invokes it via /<name>.
  */
 export function listSkills(config: ClawConfig): Skill[] {
+  // Same gate as project agents: a skill body is injected as system context.
   const dirs = [
     path.join(config.homeDir, "skills"),
-    path.join(config.workdir, ".claw", "skills"),
+    ...(config.trustProjectDefinitions === true ? [path.join(config.workdir, ".claw", "skills")] : []),
   ];
   const skills: Skill[] = [];
   for (const dir of dirs) {

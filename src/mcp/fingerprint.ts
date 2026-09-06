@@ -61,10 +61,10 @@ export function computeFingerprint(input: McpFingerprintInput): McpFingerprint {
   const stdioConfig = input.config;
   const resolved = resolveBinary(stdioConfig.command);
   const binarySha256 = resolved ? sha256OfFile(resolved) ?? undefined : undefined;
-  const envNames = Object.keys({
-    ...process.env,
-    ...(stdioConfig.env ?? {}),
-  }).sort();
+  // Only the variables actually handed to the server. Hashing every name in
+  // process.env made fingerprintId change with any unrelated shell variable
+  // and differ across machines, which makes it useless as a consent key.
+  const envNames = serverEnvNames(stdioConfig.env);
   const fp: McpFingerprint = {
     transport: "stdio",
     name: input.name,
@@ -140,4 +140,55 @@ function shellQuote(s: string): string {
   // returning a non-resolvable token. Avoids passing shell metacharacters
   // into `command -v`.
   return /^[A-Za-z0-9._/-]+$/.test(s) ? s : "__claw_invalid_command__";
+}
+
+/**
+ * Variables an MCP server needs to run at all. Everything else is withheld:
+ * passing the whole environment handed every server OPENAI_API_KEY and any
+ * other token the shell happened to be carrying.
+ *
+ * Widen deliberately with OPENAI_CLAW_MCP_ENV_PASSTHROUGH (comma-separated
+ * variable names), or declare values directly in the server's `env` block.
+ */
+const ENV_PASSTHROUGH = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "TMPDIR",
+  "TZ",
+  "NODE_EXTRA_CA_CERTS",
+  // Windows equivalents.
+  "SystemRoot",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "USERPROFILE",
+  "PATHEXT",
+  "COMSPEC",
+];
+
+export function serverEnvNames(declared?: Record<string, string>): string[] {
+  const extra = (process.env.OPENAI_CLAW_MCP_ENV_PASSTHROUGH ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const names = new Set<string>();
+  for (const key of [...ENV_PASSTHROUGH, ...extra]) {
+    if (process.env[key] !== undefined) names.add(key);
+  }
+  for (const key of Object.keys(declared ?? {})) names.add(key);
+  return Array.from(names).sort();
+}
+
+export function buildServerEnv(declared?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of serverEnvNames(declared)) {
+    const value = declared?.[name] ?? process.env[name];
+    if (value !== undefined) env[name] = value;
+  }
+  return env;
 }

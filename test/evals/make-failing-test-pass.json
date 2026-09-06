@@ -1,0 +1,16 @@
+{
+  "id": "make-failing-test-pass",
+  "description": "Run a failing test, diagnose, fix the source, and confirm. Exercises Bash plus the read-edit-verify loop.",
+  "setup": [
+    "printf 'export function add(a, b) {\\n  return a - b;\\n}\\n' > add.mjs",
+    "printf 'import assert from \"node:assert\";\\nimport { add } from \"./add.mjs\";\\nassert.strictEqual(add(2, 3), 5);\\nconsole.log(\"ok\");\\n' > test.mjs"
+  ],
+  "prompt": "Running `node test.mjs` fails. Find out why and fix the source so it passes. Do not change the test.",
+  "expect": {
+    "shell_passes": ["node test.mjs"],
+    "files_unchanged": ["test.mjs"],
+    "tools_used": ["Bash"],
+    "no_new_files": true
+  },
+  "maxTurns": 20
+}

@@ -36,7 +36,7 @@ Three calendars from three independent operators — any one of them being hones
 
 ## What `verify.sh` proves
 
-1. **The session existed at or before a Bitcoin block time.** The sha256 of the signed attestation header is in the merge queue of three OpenTimestamps calendars right now. Within ~3 hours of when this artifact was generated, that digest is folded into the calendar's daily Merkle root, which is then committed to Bitcoin via an OP_RETURN transaction. Run `ots upgrade proofs/*.ots && ots verify proofs/*.ots` to chase the chain.
+1. **The session existed at or before a Bitcoin block time.** The sha256 of the signed attestation header is in the merge queue of three OpenTimestamps calendars right now. Within ~3 hours of when this artifact was generated, that digest is folded into the calendar's daily Merkle root, which is then committed to Bitcoin via an OP_RETURN transaction. Run `ots upgrade proofs/*.ots`, then `ots verify -d <digest> proofs/<one>.ots` to chase the chain (the digest is `anchor.digest` in the sidecar — the timestamped message is the header's canonical JSON, not a file on disk, so `-d` is required).
 2. **The leaves match the deterministic Merkle root.** Recomputing `merkleRoot(sha256(canonical-JSON(leaf)))` from `sample-session.attest.json` produces the exact value the header was signed over.
 3. **The Merkle root was signed by the local ML-DSA-65 identity.** The signature in the sidecar verifies under the public key embedded in the same sidecar.
 4. **The `.ots` files are independently parseable by the standard OpenTimestamps tool.** `ots info` recognizes the header magic, the file hash op, the digest, and the pending attestation pointing at each calendar's URL — claw is not in the verification path.
@@ -50,7 +50,7 @@ This honesty is what makes the project defensible:
 2. **The user intended every action the AI took.** Verification proves the agent did what is in the sidecar. It does not prove the user wanted it.
 3. **The terminal environment was clean.** If the local machine was compromised at the time of the session, the attestor could have been fed false data. The signature would still verify.
 4. **The model was honest internally.** Verification covers the I/O boundary. It says nothing about model behavior, alignment, hallucination, or intent.
-5. **The Bitcoin block has confirmed yet.** Initially the OTS proofs are pending. They become Bitcoin-anchored automatically within ~3 hours via the calendars' aggregation tree. Run `ots upgrade` to fetch the upgraded proof, then `ots verify`.
+5. **The Bitcoin block has confirmed yet.** Initially the OTS proofs are pending. They become Bitcoin-anchored automatically within ~3 hours via the calendars' aggregation tree. Run `ots upgrade <file>.ots` to fetch the completed proof, then `ots verify -d <digest> <file>.ots`. Reading the block back out needs a local Bitcoin node.
 
 ## The architecture in one diagram
 

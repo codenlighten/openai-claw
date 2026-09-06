@@ -1,0 +1,25 @@
+{
+  "id": "multi-file-rename",
+  "description": "Rename a symbol used across three files. Exercises bulk discovery then a coherent edit pass, rather than one-file-at-a-time drift.",
+  "setup": [
+    "mkdir -p src",
+    "printf 'export function computeTotal(items) {\\n  return items.length;\\n}\\n' > src/total.js",
+    "printf 'import { computeTotal } from \"./total.js\";\\nexport const cartSize = (c) => computeTotal(c.items);\\n' > src/cart.js",
+    "printf 'import { computeTotal } from \"./total.js\";\\nconsole.log(computeTotal([1,2,3]));\\n' > src/report.js"
+  ],
+  "prompt": "Rename the function `computeTotal` to `itemCount` everywhere in src/. Update the definition and every import and call site.",
+  "expect": {
+    "file_matches": [
+      { "path": "src/total.js", "pattern": "function itemCount" },
+      { "path": "src/cart.js", "pattern": "itemCount" },
+      { "path": "src/report.js", "pattern": "itemCount" }
+    ],
+    "file_not_matches": [
+      { "path": "src/total.js", "pattern": "computeTotal" },
+      { "path": "src/cart.js", "pattern": "computeTotal" },
+      { "path": "src/report.js", "pattern": "computeTotal" }
+    ],
+    "no_new_files": true
+  },
+  "maxTurns": 20
+}

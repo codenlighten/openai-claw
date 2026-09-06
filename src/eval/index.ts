@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { Agent } from "../agent.js";
 import { getAllTools } from "../tools/index.js";
@@ -8,6 +9,42 @@ import { PermissionManager } from "../permissions/index.js";
 import { loadConfig } from "../config.js";
 import { runSubagent } from "../subagent.js";
 import type { ClawConfig } from "../config.js";
+
+/** Default wall-clock budget per case. */
+const DEFAULT_CASE_TIMEOUT_MS = 300_000;
+
+export interface EvalExpectations {
+  /** File paths (relative to the sandbox) that must exist after the run. */
+  files_exist?: string[];
+  /** File paths that must NOT exist (e.g. you asked the agent to delete them). */
+  files_missing?: string[];
+  /** For each (path, regex) pair the file's content must match the regex. */
+  file_matches?: { path: string; pattern: string }[];
+  /** For each (path, regex) pair the file's content must NOT match the regex. */
+  file_not_matches?: { path: string; pattern: string }[];
+  /** Shell command(s) that must exit 0 (e.g. `npm test`). */
+  shell_passes?: string[];
+  /** Tool names that should have been called at least once. */
+  tools_used?: string[];
+  /** Tool names that must NOT have been called — scope discipline. */
+  tools_not_used?: string[];
+  /**
+   * Tool names whose call must actually have been REFUSED. Without this a case
+   * that means to exercise a denial can allowlist its way past one and still
+   * pass, testing nothing.
+   */
+  tools_denied?: string[];
+  /** No file may exist that wasn't there before the run. */
+  no_new_files?: boolean;
+  /** These files must be byte-identical to their pre-run content. */
+  files_unchanged?: string[];
+  /** Upper bound on model turns — catches thrashing that still lands correctly. */
+  max_turns_used?: number;
+  /** At least one context compaction must have happened. */
+  compacted?: boolean;
+  /** At least one `warning` event must have been emitted (e.g. truncation). */
+  warned?: boolean;
+}
 
 export interface EvalCase {
   /** Stable id used to key result files. */
@@ -18,20 +55,37 @@ export interface EvalCase {
   /** The user prompt the agent receives. */
   prompt: string;
   /** Expected outcomes. All must hold for the case to pass. */
-  expect?: {
-    /** File paths (relative to the sandbox) that must exist after the run. */
-    files_exist?: string[];
-    /** File paths that must NOT exist (e.g. you asked the agent to delete them). */
-    files_missing?: string[];
-    /** For each (path, regex) pair the file's content must match the regex. */
-    file_matches?: { path: string; pattern: string }[];
-    /** Shell command(s) that must exit 0 (e.g. `npm test`). */
-    shell_passes?: string[];
-    /** Tool names that should have been called at least once. */
-    tools_used?: string[];
-  };
+  expect?: EvalExpectations;
   /** Max agent turns before we fail the case. */
   maxTurns?: number;
+  /**
+   * Wall-clock budget for the run. maxTurns alone does not bound a case: a
+   * Task call spawns a subagent with its own turn budget, so the real ceiling
+   * is turns x turns worth of API calls and a case can run for a very long
+   * time with nothing to stop it.
+   */
+  timeoutMs?: number;
+  /** Permission mode for the run. Defaults to bypassPermissions. */
+  permissionMode?: ClawConfig["permissionMode"];
+  allowedTools?: string[];
+  deniedTools?: string[];
+  /** Answer the scripted prompter gives when permission is requested. Default "no". */
+  promptAnswer?: "yes" | "no";
+  /**
+   * Model-window knobs. Without these the suite could not reach compaction or
+   * truncation at all: sandboxes are tiny, so the real context window is never
+   * approached and the model is never cut off. Both are agent logic that
+   * otherwise only ever ran against mocks.
+   */
+  contextWindow?: number;
+  compactThreshold?: number;
+  maxTokens?: number;
+  /**
+   * By default an `error` event fails the case: a 400 from a malformed
+   * conversation, or hitting maxTurns, means the loop broke even if the files
+   * happen to look right. Set true for cases that deliberately provoke one.
+   */
+  allow_errors?: boolean;
 }
 
 export interface EvalResult {
@@ -39,9 +93,13 @@ export interface EvalResult {
   passed: boolean;
   turns: number;
   toolsUsed: string[];
+  toolsDenied: string[];
+  compactions: number;
+  warnings: string[];
   durationMs: number;
   costUSD: number;
   totalTokens: number;
+  errors: string[];
   failures: string[];
 }
 
@@ -67,10 +125,142 @@ export function loadEvalCases(dir: string): EvalCase[] {
   return cases;
 }
 
+/** relpath -> sha256 of content, for every file under `dir` except .git. */
+export function snapshotDir(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (current: string) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.name === ".git") continue;
+      const full = path.join(current, e.name);
+      if (e.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      try {
+        out[path.relative(dir, full)] = createHash("sha256").update(fs.readFileSync(full)).digest("hex");
+      } catch {}
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+export interface EvalObservation {
+  compactions: number;
+  warnings: string[];
+  toolsUsed: string[];
+  /** Tools whose call was refused by the permission layer. */
+  toolsDenied: string[];
+  turns: number;
+  errors: string[];
+  /** snapshotDir() taken immediately before the agent ran. */
+  before: Record<string, string>;
+}
+
+/**
+ * Evaluate a case's expectations against the finished sandbox. Pure apart from
+ * reading the sandbox and running `shell_passes`, so the whole expectation
+ * vocabulary is testable without spending a model call.
+ */
+export function checkExpectations(
+  sandbox: string,
+  expectations: EvalExpectations = {},
+  obs: EvalObservation,
+  allowErrors = false
+): string[] {
+  const failures: string[] = [];
+  const toolsUsed = new Set(obs.toolsUsed);
+  const toolsDenied = new Set(obs.toolsDenied);
+
+  if (!allowErrors && obs.errors.length > 0) {
+    failures.push(`agent reported ${obs.errors.length} error(s): ${obs.errors.join(" | ")}`);
+  }
+
+  for (const f of expectations.files_exist ?? []) {
+    if (!fs.existsSync(path.join(sandbox, f))) failures.push(`expected file missing: ${f}`);
+  }
+  for (const f of expectations.files_missing ?? []) {
+    if (fs.existsSync(path.join(sandbox, f))) failures.push(`expected absence but file exists: ${f}`);
+  }
+  for (const m of expectations.file_matches ?? []) {
+    const fp = path.join(sandbox, m.path);
+    if (!fs.existsSync(fp)) {
+      failures.push(`file_matches target missing: ${m.path}`);
+      continue;
+    }
+    if (!new RegExp(m.pattern, "m").test(fs.readFileSync(fp, "utf8"))) {
+      failures.push(`file ${m.path} does not match /${m.pattern}/`);
+    }
+  }
+  for (const m of expectations.file_not_matches ?? []) {
+    const fp = path.join(sandbox, m.path);
+    if (!fs.existsSync(fp)) {
+      failures.push(`file_not_matches target missing: ${m.path}`);
+      continue;
+    }
+    if (new RegExp(m.pattern, "m").test(fs.readFileSync(fp, "utf8"))) {
+      failures.push(`file ${m.path} still matches /${m.pattern}/`);
+    }
+  }
+  for (const cmd of expectations.shell_passes ?? []) {
+    const r = spawnSync("bash", ["-c", cmd], { cwd: sandbox, encoding: "utf8" });
+    if (r.status !== 0) {
+      failures.push(`shell_passes failed (exit ${r.status}): ${cmd}\n${r.stderr || r.stdout}`);
+    }
+  }
+  for (const t of expectations.tools_used ?? []) {
+    if (!toolsUsed.has(t)) failures.push(`tool not used: ${t}`);
+  }
+  for (const t of expectations.tools_not_used ?? []) {
+    if (toolsUsed.has(t)) failures.push(`tool should not have been used: ${t}`);
+  }
+  for (const t of expectations.tools_denied ?? []) {
+    if (!toolsDenied.has(t)) {
+      failures.push(`expected ${t} to be denied, but no denial was recorded`);
+    }
+  }
+  if (expectations.no_new_files) {
+    const after = snapshotDir(sandbox);
+    const created = Object.keys(after).filter((f) => !(f in obs.before));
+    if (created.length > 0) failures.push(`unexpected new file(s): ${created.join(", ")}`);
+  }
+  for (const f of expectations.files_unchanged ?? []) {
+    const fp = path.join(sandbox, f);
+    if (!fs.existsSync(fp)) {
+      failures.push(`files_unchanged target missing: ${f}`);
+      continue;
+    }
+    const now = createHash("sha256").update(fs.readFileSync(fp)).digest("hex");
+    if (obs.before[f] !== now) failures.push(`file changed but should not have: ${f}`);
+  }
+  if (expectations.max_turns_used !== undefined && obs.turns > expectations.max_turns_used) {
+    failures.push(`took ${obs.turns} turns, expected at most ${expectations.max_turns_used}`);
+  }
+  if (expectations.compacted && obs.compactions === 0) {
+    failures.push("expected the context to be compacted at least once, but it never was");
+  }
+  if (expectations.warned && obs.warnings.length === 0) {
+    failures.push("expected a warning event, but none was emitted");
+  }
+  return failures;
+}
+
 async function runOne(c: EvalCase): Promise<EvalResult> {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), `claw-eval-${c.id}-`));
+  const homes: string[] = [];
   const failures: string[] = [];
+  const errors: string[] = [];
   const toolsUsed = new Set<string>();
+  const toolsDenied = new Set<string>();
+  const warnings: string[] = [];
+  let compactions = 0;
   let turns = 0;
   const start = Date.now();
   try {
@@ -86,54 +276,83 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
       }
     }
 
+    const before = snapshotDir(sandbox);
+
+    // Hermetic home: without this a case reads the developer's own
+    // ~/.openai-claw settings, memories and MCP servers, so the same case
+    // passes on one machine and fails on another for reasons nothing records.
+    const evalHome = fs.mkdtempSync(path.join(os.tmpdir(), `claw-evalhome-${c.id}-`));
+    homes.push(evalHome);
     const config: ClawConfig = loadConfig({
       workdir: sandbox,
-      permissionMode: "bypassPermissions",
+      homeDir: evalHome,
+      projectDir: evalHome,
+      memoryDir: path.join(evalHome, "memory"),
+      permissionMode: c.permissionMode ?? "bypassPermissions",
       maxTurns: c.maxTurns ?? 30,
+      allowedTools: c.allowedTools ?? [],
+      deniedTools: c.deniedTools ?? [],
+      ...(c.contextWindow !== undefined ? { contextWindow: c.contextWindow } : {}),
+      ...(c.compactThreshold !== undefined ? { compactThreshold: c.compactThreshold } : {}),
+      ...(c.maxTokens !== undefined ? { maxTokens: c.maxTokens } : {}),
     });
     const tools = getAllTools(config);
-    const permissions = new PermissionManager(config);
+    // Scripted prompter: evals never have a human, and a case that exercises a
+    // denial needs the answer to be deterministic rather than a hung stdin read.
+    const permissions = new PermissionManager(config, async () => c.promptAnswer ?? "no");
     const agent = new Agent({
       config,
       tools,
-      permissionCheck: (t, i) => permissions.check(t, i),
-      spawnSubagent: (req) => runSubagent(config, (t, i) => permissions.check(t, i), req),
+      permissionCheck: (t, i, m) => permissions.check(t, i, m),
+      spawnSubagent: (req, signal) => runSubagent(config, (t, i, m) => permissions.check(t, i, m), req, undefined, signal),
     });
     agent.pushUser(c.prompt);
-    await agent.run((evt) => {
-      if (evt.type === "tool_call") {
-        const d = evt.data as { name: string };
-        toolsUsed.add(d.name);
-      }
-      if (evt.type === "usage") turns++;
-    });
+    const timeoutMs = c.timeoutMs ?? DEFAULT_CASE_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      await agent.run((evt) => {
+        if (evt.type === "tool_call") {
+          const d = evt.data as { name: string };
+          toolsUsed.add(d.name);
+        }
+        if (evt.type === "usage") turns++;
+        if (evt.type === "error") errors.push(String(evt.data));
+        if (evt.type === "warning") warnings.push(String(evt.data));
+        if (evt.type === "compaction") {
+          const d = evt.data as { skipped?: string };
+          if (!d?.skipped) compactions++;
+        }
+        if (evt.type === "tool_result") {
+          const d = evt.data as { name: string; content: string; isError?: boolean };
+          if (d.isError && d.content.startsWith(`Permission denied for ${d.name}`)) {
+            toolsDenied.add(d.name);
+          }
+        }
+      }, controller.signal);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (controller.signal.aborted) {
+      failures.push(`timed out after ${timeoutMs}ms (${turns} turn(s) completed)`);
+    }
 
-    // Evaluate expectations.
-    const exp = c.expect ?? {};
-    for (const f of exp.files_exist ?? []) {
-      if (!fs.existsSync(path.join(sandbox, f))) failures.push(`expected file missing: ${f}`);
-    }
-    for (const f of exp.files_missing ?? []) {
-      if (fs.existsSync(path.join(sandbox, f))) failures.push(`expected absence but file exists: ${f}`);
-    }
-    for (const m of exp.file_matches ?? []) {
-      const fp = path.join(sandbox, m.path);
-      if (!fs.existsSync(fp)) {
-        failures.push(`file_matches target missing: ${m.path}`);
-        continue;
-      }
-      const body = fs.readFileSync(fp, "utf8");
-      if (!new RegExp(m.pattern, "m").test(body)) {
-        failures.push(`file ${m.path} does not match /${m.pattern}/`);
-      }
-    }
-    for (const cmd of exp.shell_passes ?? []) {
-      const r = spawnSync("bash", ["-c", cmd], { cwd: sandbox, encoding: "utf8" });
-      if (r.status !== 0) failures.push(`shell_passes failed (exit ${r.status}): ${cmd}\n${r.stderr || r.stdout}`);
-    }
-    for (const t of exp.tools_used ?? []) {
-      if (!toolsUsed.has(t)) failures.push(`tool not used: ${t}`);
-    }
+    failures.push(
+      ...checkExpectations(
+        sandbox,
+        c.expect,
+        {
+          toolsUsed: Array.from(toolsUsed),
+          toolsDenied: Array.from(toolsDenied),
+          compactions,
+          warnings,
+          turns,
+          errors,
+          before,
+        },
+        c.allow_errors
+      )
+    );
 
     return finalize(agent.usage.totalCostUSD, agent.usage.totalTokens);
   } catch (e: any) {
@@ -141,6 +360,9 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
     return finalize();
   } finally {
     try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch {}
+    for (const h of homes) {
+      try { fs.rmSync(h, { recursive: true, force: true }); } catch {}
+    }
   }
 
   function finalize(costUSD = 0, totalTokens = 0): EvalResult {
@@ -149,19 +371,35 @@ async function runOne(c: EvalCase): Promise<EvalResult> {
       passed: failures.length === 0,
       turns,
       toolsUsed: Array.from(toolsUsed),
+      toolsDenied: Array.from(toolsDenied),
+      compactions,
+      warnings,
       durationMs: Date.now() - start,
       costUSD,
       totalTokens,
+      errors,
       failures,
     };
   }
 }
 
-export async function runEvalSuite(dir: string): Promise<EvalReport> {
+/**
+ * Run every case in `dir`, reporting each result as it lands.
+ *
+ * `onResult` exists because a suite of real model calls takes minutes and costs
+ * money: printing only at the end means an interrupted run shows nothing at all
+ * for work already paid for.
+ */
+export async function runEvalSuite(
+  dir: string,
+  onResult?: (result: EvalResult, index: number, total: number) => void
+): Promise<EvalReport> {
   const cases = loadEvalCases(dir);
   const results: EvalResult[] = [];
-  for (const c of cases) {
-    results.push(await runOne(c));
+  for (const [i, c] of cases.entries()) {
+    const result = await runOne(c);
+    results.push(result);
+    onResult?.(result, i, cases.length);
   }
   return {
     ranAt: new Date().toISOString(),

@@ -111,10 +111,12 @@ export interface VerifyReport {
     /** Anchor digest matches sha256(canonical-JSON(header)). Skipped when no anchor. */
     anchorDigest?: boolean;
     /**
-     * Every mcp__-prefixed tool_call leaf has a preceding mcp_attach leaf
-     * referenced by serverRef, a matching mcp_tool_offered leaf, and a
-     * permission_decision leaf with consent: yes. Skipped when no
-     * mcp__-prefixed tool calls appear in the session.
+     * STRUCTURAL only: every mcp__-prefixed tool_call leaf is preceded by an
+     * mcp_attach, an mcp_tool_offered and a permission_decision leaf. Because
+     * leaves carry payload HASHES, the verifier cannot read those payloads —
+     * it cannot confirm they describe this server, this tool, or a granted
+     * (rather than refused) consent. Binding them requires session.json to
+     * record MCP events too. Skipped when the session uses no MCP tools.
      */
     mcpProvenance?: boolean;
   };
@@ -130,5 +132,7 @@ export interface VerifyReport {
     serversSeen: number;
     toolCallsSignedWithProvenance: number;
     toolCallsMissingProvenance: number;
+    /** Always true today: the provenance check counts leaf kinds, not payloads. */
+    structural: true;
   };
 }

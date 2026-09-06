@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ok, err } from "../tools/types.js";
-import { computeFingerprint } from "./fingerprint.js";
+import { computeFingerprint, buildServerEnv } from "./fingerprint.js";
 let connected = [];
 export function loadMcpServerSpecs(config, opts = {}) {
     const includeProject = opts.includeProject ?? true;
@@ -19,7 +19,11 @@ export function loadMcpServerSpecs(config, opts = {}) {
         ...(user.mcpServers ?? {}),
         ...(proj.mcpServers ?? {}),
     };
-    return Object.entries(merged).map(([name, cfg]) => ({ name, config: cfg }));
+    return Object.entries(merged).map(([name, cfg]) => ({
+        name,
+        config: cfg,
+        scope: projNames.includes(name) ? "project" : "user",
+    }));
 }
 export async function startMcpServers(specs) {
     await disconnectAll();
@@ -51,7 +55,7 @@ async function connectOne(spec) {
         : new StdioClientTransport({
             command: spec.config.command,
             args: spec.config.args ?? [],
-            env: { ...process.env, ...(spec.config.env ?? {}) },
+            env: buildServerEnv(spec.config.env),
             cwd: spec.config.cwd,
         });
     const client = new Client({ name: "openai-claw", version: "0.1.0" }, { capabilities: {} });
@@ -109,7 +113,7 @@ async function connectOne(spec) {
             console.warn(`[claw] MCP '${spec.name}' listPrompts failed: ${e?.message ?? e}`);
         }
     }
-    return { name: spec.name, client, tools, resources, prompts, fingerprint, toolOfferings };
+    return { name: spec.name, client, tools, resources, prompts, fingerprint, toolOfferings, scope: spec.scope };
 }
 /**
  * Inspect the currently-connected MCP servers. Used by the Attestor and CLI
@@ -122,6 +126,7 @@ export function getConnectedServers() {
         name: c.name,
         fingerprint: c.fingerprint,
         toolOfferings: c.toolOfferings,
+        scope: c.scope,
     }));
 }
 function sha256Canon(value) {

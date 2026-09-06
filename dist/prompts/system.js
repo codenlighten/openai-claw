@@ -2,6 +2,7 @@ import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import { listMemories } from "../memory/index.js";
+import { planModeExtra } from "../planmode.js";
 export function buildSystemPrompt(opts) {
     const { config, tools, extras = [], variant = "main" } = opts;
     const toolList = formatToolList(tools);
@@ -20,6 +21,10 @@ export function buildSystemPrompt(opts) {
         `Today's date: ${date}`,
         `You are powered by OpenAI's '${config.model}' model.`,
     ].join("\n");
+    // Plan mode is a property of the current config, so it belongs in the prompt
+    // rather than as a pseudo-<system> user message that stays in the transcript
+    // after plan mode is switched off.
+    const planExtra = config.permissionMode === "plan" ? [planModeExtra()] : [];
     const memoryContext = loadMemoryContext(config);
     const claudeMd = loadProjectInstructions(config.workdir);
     const base = `You are openai-claw, a CLI assistant for software engineering tasks. You are modeled after Anthropic's Claude Code but powered by OpenAI's API.
@@ -46,6 +51,11 @@ ${toolList}
 - After an Edit fails, re-Read the file before retrying — the content has likely shifted.
 - Preserve the existing indentation style of a file you're editing (tabs vs. spaces). Look at neighboring lines.
 
+# Task management
+- For work that spans three or more distinct steps, call TodoWrite first with the whole plan, then keep it current as you go. The list is what the user watches to know where you are.
+- Exactly one item is in_progress at a time. Mark an item completed the moment it is done — not in a batch at the end.
+- Skip it for single-step work. A todo list for "fix this typo" is noise.
+
 # Executing actions with care
 - Local, reversible actions (editing files, running tests, reading state) are fine.
 - Risky actions (force pushes, deleting branches, dropping tables, removing packages, sending messages, posting to PRs/issues, modifying CI) require confirmation unless the user has explicitly authorized them for the current scope.
@@ -67,12 +77,12 @@ ${toolList}
 
 # Environment
 ${stableEnv}
-${claudeMd ? `\n# Project instructions (from CLAUDE.md)\n${claudeMd}` : ""}
+${claudeMd ? `\n# Project instructions\n${claudeMd}` : ""}
 
 # Session
 ${volatileEnv}
 ${memoryContext ? `\n# Persistent memory\n${memoryContext}` : ""}
-${extras.length ? `\n${extras.join("\n")}` : ""}`;
+${[...planExtra, ...extras].length ? `\n${[...planExtra, ...extras].join("\n")}` : ""}`;
     if (variant === "subagent-general") {
         return `${base}\n\n# Subagent context\nYou are a subagent. Return a concise final summary of your findings. You will be invoked once with a self-contained prompt — there is no follow-up turn.`;
     }
@@ -107,7 +117,14 @@ function formatToolList(tools) {
     return lines.join("\n");
 }
 function loadProjectInstructions(workdir) {
-    const candidates = [path.join(workdir, "CLAUDE.md"), path.join(workdir, ".claw", "CLAW.md")];
+    // First match wins. CLAW.md at the project root was missing from this list,
+    // so a repo whose instructions live there (this one included) silently ran
+    // with no project instructions at all.
+    const candidates = [
+        path.join(workdir, "CLAUDE.md"),
+        path.join(workdir, "CLAW.md"),
+        path.join(workdir, ".claw", "CLAW.md"),
+    ];
     for (const p of candidates) {
         if (fs.existsSync(p)) {
             try {

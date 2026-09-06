@@ -12,6 +12,7 @@ const MIME: Record<string, string> = {
   ".webp": "image/webp",
 };
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_DIR_ENTRIES = 80;
 
 export interface PreparedMessage {
   /** What we'll send to the model — string if no images, array of parts otherwise. */
@@ -67,8 +68,11 @@ export function prepareUserMessage(input: string, config: ClawConfig): PreparedM
     try {
       const stat = fs.statSync(abs);
       if (stat.isDirectory()) {
-        const entries = fs.readdirSync(abs).slice(0, 80).join("\n");
-        textAppends.push(`<directory path="${abs}">\n${entries}\n</directory>`);
+        const all = fs.readdirSync(abs);
+        const shown = all.slice(0, MAX_DIR_ENTRIES);
+        const hidden = all.length - shown.length;
+        const more = hidden > 0 ? `\n… ${hidden} more ${hidden === 1 ? "entry" : "entries"} not shown` : "";
+        textAppends.push(`<directory path="${abs}">\n${shown.join("\n")}${more}\n</directory>`);
         attachments.push(`📁 ${path.basename(abs)}/`);
         continue;
       }

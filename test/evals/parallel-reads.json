@@ -1,0 +1,14 @@
+{
+  "id": "parallel-reads",
+  "description": "REGRESSION: many tool calls in one assistant turn. Every call must come back paired with its tool_call_id — an unpaired one produced the 'did not have response messages' 400 that persisted across retries.",
+  "setup": [
+    "for i in 1 2 3 4 5 6 7 8; do printf 'export const value%s = %s;\\n' \"$i\" \"$i\" > \"mod$i.js\"; done"
+  ],
+  "prompt": "Read all eight mod*.js files and tell me the sum of the values they export. Read them in parallel.",
+  "expect": {
+    "tools_used": ["Read"],
+    "no_new_files": true,
+    "max_turns_used": 6
+  },
+  "maxTurns": 12
+}

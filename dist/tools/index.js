@@ -8,7 +8,7 @@ import { lsTool } from "./ls.js";
 import { webFetchTool } from "./webfetch.js";
 import { webSearchTool } from "./websearch.js";
 import { taskTool, buildTaskTool } from "./task.js";
-import { todoWriteTool } from "./todo.js";
+import { todoWriteTool, createSubagentTodoTool } from "./todo.js";
 import { bashOutputTool, killShellTool } from "./shell.js";
 import { semanticTool } from "./semantic.js";
 /**
@@ -39,6 +39,9 @@ export function getSubagentTools(kind) {
     if (kind === "explore") {
         return [readTool, grepTool, globTool, lsTool, semanticTool, webFetchTool, webSearchTool];
     }
-    return getAllTools().filter((t) => t.name !== "Task");
+    // Own todo list, not the parent's — see createSubagentTodoTool.
+    return getAllTools()
+        .filter((t) => t.name !== "Task" && t.name !== "TodoWrite")
+        .concat(createSubagentTodoTool());
 }
 //# sourceMappingURL=index.js.map

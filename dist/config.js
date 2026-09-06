@@ -20,9 +20,9 @@ export function loadConfig(overrides = {}) {
         throw new Error("OPENAI_API_KEY is not set. Export it in your shell or add it to your .env file.");
     }
     const workdir = overrides.workdir ?? process.cwd();
-    const homeDir = path.join(os.homedir(), ".openai-claw");
-    const projectDir = resolveProjectDir(workdir);
-    const memoryDir = path.join(projectDir, "memory");
+    const homeDir = overrides.homeDir ?? path.join(os.homedir(), ".openai-claw");
+    const projectDir = overrides.projectDir ?? resolveProjectDir(workdir);
+    const memoryDir = overrides.memoryDir ?? path.join(projectDir, "memory");
     for (const dir of [homeDir, projectDir, memoryDir]) {
         if (!fs.existsSync(dir))
             fs.mkdirSync(dir, { recursive: true });
@@ -31,9 +31,9 @@ export function loadConfig(overrides = {}) {
     const userSettings = readJsonSafe(path.join(homeDir, "settings.json"));
     const projectSettings = readJsonSafe(path.join(workdir, ".claw", "settings.json"));
     const merged = {
-        model: process.env.OPENAI_CLAW_MODEL ?? userSettings.model ?? projectSettings.model ?? DEFAULTS.model,
+        model: process.env.OPENAI_CLAW_MODEL ?? projectSettings.model ?? userSettings.model ?? DEFAULTS.model,
         apiKey,
-        baseURL: process.env.OPENAI_BASE_URL ?? userSettings.baseURL ?? projectSettings.baseURL,
+        baseURL: process.env.OPENAI_BASE_URL ?? projectSettings.baseURL ?? userSettings.baseURL,
         maxTokens: projectSettings.maxTokens ?? userSettings.maxTokens,
         temperature: projectSettings.temperature ?? userSettings.temperature,
         contextWindow: projectSettings.contextWindow ?? userSettings.contextWindow ?? DEFAULTS.contextWindow,
@@ -63,10 +63,20 @@ function readJsonSafe(p) {
     }
 }
 export function saveUserSetting(config, key, value) {
+    updateUserSettings(config, (current) => {
+        current[key] = value;
+    });
+}
+/**
+ * Read-modify-write the user settings file under the lock. Every writer must
+ * go through here — a direct writeFileSync races the permission prompt's
+ * "save" path and silently drops one side's changes.
+ */
+export function updateUserSettings(config, mutate) {
     const p = path.join(config.homeDir, "settings.json");
     withSettingsLock(p, () => {
         const current = readJsonSafe(p);
-        current[key] = value;
+        mutate(current);
         fs.writeFileSync(p, JSON.stringify(current, null, 2));
     });
 }

@@ -145,8 +145,12 @@ function sendHtml(res, html) {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(html);
 }
-export async function startDashboard(config, port) {
-    const server = http.createServer((req, res) => {
+/**
+ * Build the dashboard's HTTP server without listening. Exported so callers
+ * (and tests) can choose the port and interface.
+ */
+export function createDashboardServer(config, port = 0) {
+    return http.createServer((req, res) => {
         const url = new URL(req.url || "/", `http://localhost:${port}`);
         try {
             if (url.pathname === "/")
@@ -187,8 +191,17 @@ export async function startDashboard(config, port) {
             res.end(`server error: ${e?.message ?? e}`);
         }
     });
-    await new Promise((resolve) => server.listen(port, () => resolve()));
-    console.error(chalk.green(`dashboard listening on http://localhost:${port}`));
+}
+/**
+ * The dashboard serves whole session transcripts and the cost log with no
+ * authentication, so it binds loopback only. Pass an explicit host to widen
+ * that deliberately.
+ */
+export async function startDashboard(config, port, opts = {}) {
+    const host = opts.host ?? "127.0.0.1";
+    const server = createDashboardServer(config, port);
+    await new Promise((resolve) => server.listen(port, host, () => resolve()));
+    console.error(chalk.green(`dashboard listening on http://${host}:${port}`));
     console.error(chalk.dim("Ctrl-C to stop"));
     await new Promise(() => { }); // run until killed
 }
